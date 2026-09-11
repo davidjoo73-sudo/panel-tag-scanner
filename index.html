@@ -221,7 +221,7 @@
     });
     return { rows, headers };
   }
-  const PANEL_ALIASES = ['panel', 'panelno', 'panel_no', '판넬', '판넬번호', '패널', '패널번호'];
+  const PANEL_ALIASES = ['panel', 'panelno', 'panel_no', 'location', '판넬', '판넬번호', '패널', '패널번호', '위치', '로케이션'];
   const TAG_ALIASES = ['tag', '선번호', 'wireno', 'wire_no', 'key', 'id'];
   function findCol(headers, aliases, exclude) {
     return headers.find(h => {
@@ -339,6 +339,20 @@
     applyRows(rows, headers);
   }
 
+  function sheetToRowsSmart(sheet) {
+    // 실제 회사 양식은 1행이 비어있고 2행에 헤더가 있는 경우가 있어, 첫 헤더처럼 보이는 행을 자동으로 찾는다.
+    const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
+    let headerRowIdx = raw.findIndex(r => r.filter(c => String(c).trim() !== '').length >= 2);
+    if (headerRowIdx === -1) headerRowIdx = 0;
+    const headers = raw[headerRowIdx].map((h, i) => (h && String(h).trim()) || ('COL' + (i + 1)));
+    const rows = raw.slice(headerRowIdx + 1).map(r => {
+      const o = {};
+      headers.forEach((h, i) => { o[h] = r[i] != null ? String(r[i]) : ''; });
+      return o;
+    }).filter(o => Object.values(o).some(v => v !== ''));
+    return { rows, headers };
+  }
+
   function applyWorkbookArrayBuffer(buffer) {
     if (typeof XLSX === 'undefined') {
       listStatusEl.textContent = '엑셀 처리 라이브러리를 불러오지 못했습니다 (네트워크 확인 필요). CSV로 시도해주세요.';
@@ -349,14 +363,7 @@
       const wb = XLSX.read(buffer, { type: 'array' });
       const firstSheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[firstSheetName];
-      const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
-      const headers = rows.length ? Object.keys(rows[0]) : (XLSX.utils.sheet_to_json(sheet, { header: 1 })[0] || []);
-      // 값들을 문자열로 통일(다른 로직들이 문자열 비교를 전제로 함)
-      const normRows = rows.map(r => {
-        const o = {};
-        Object.keys(r).forEach(k => { o[k] = r[k] == null ? '' : String(r[k]); });
-        return o;
-      });
+      const { rows: normRows, headers } = sheetToRowsSmart(sheet);
       applyRows(normRows, headers);
     } catch (e) {
       listStatusEl.textContent = '엑셀 파일을 읽지 못했습니다: ' + e.message;
