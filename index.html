@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0" />
+<title>Panel/TAG 오프라인 검수</title>
+<meta name="description" content="AI 사용 없이 휴대폰에서 오프라인으로 부품 TAG를 인식하고 BOM/TB LIST와 대조하는 앱" />
+<link rel="manifest" href="./manifest.json" />
+<meta name="theme-color" content="#14171a" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="TAG검수" />
+</head>
+<body style="margin:0;">
+<!-- Panel/TAG Offline Scanner - phone-only, in-browser OCR (Tesseract.js), no cloud AI -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root {
+    --bg: #14171a; --panel: #1e2226; --panel-2: #24292e; --border: #33383d;
+    --amber: #f2a93b; --amber-dim: #7a5a22; --text: #e8e6e1; --muted: #8b9198;
+    --ok: #5fd1a8; --ok-dim: #1f3d34; --err: #e0665a; --err-dim: #3d2220;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  #of-root { background: var(--bg); color: var(--text); min-height: 100%; }
+  .of-shell { max-width: 480px; margin: 0 auto; border-left: 1px solid var(--border); border-right: 1px solid var(--border); min-height: 100vh; }
+  .of-header { padding: 16px 18px 12px; border-bottom: 1px solid var(--border); }
+  .of-eyebrow { font-size: 12px; letter-spacing: 0.08em; color: var(--amber); margin: 0 0 4px; }
+  .of-title { font-size: 20px; font-weight: 650; margin: 0; }
+  .of-sub { font-size: 14px; color: var(--muted); margin: 4px 0 0; }
+
+  .of-section { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .of-section-title { font-size: 13px; letter-spacing: 0.05em; color: var(--muted); margin: 0 0 8px; }
+  .of-status { font-size: 14px; margin-bottom: 8px; }
+  .of-status.loaded { color: var(--ok); }
+  .of-status.empty { color: var(--muted); }
+  .of-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  textarea.of-paste { width: 100%; min-height: 64px; margin-top: 8px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-family: ui-monospace, monospace; font-size: 13px; padding: 8px; resize: vertical; }
+  #of-panel-select-row { display: none; margin-top: 10px; }
+  select#of-panel-select { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-size: 14px; padding: 6px 10px; }
+
+  .of-btn { background: var(--panel-2); border: 1px solid var(--border); color: var(--text); font-size: 14px; padding: 9px 14px; cursor: pointer; }
+  .of-btn:hover { border-color: var(--amber-dim); }
+  .of-btn.primary { background: var(--amber); color: #1a1a1a; border-color: var(--amber); font-weight: 650; }
+  .of-btn.ghost { background: transparent; }
+  .of-btn:disabled { opacity: 0.5; }
+
+  .of-stage-banner { padding: 12px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .of-stage-badge { font-size: 13px; font-weight: 700; padding: 5px 10px; background: var(--panel-2); border: 1px solid var(--amber-dim); color: var(--amber); }
+  .of-stage-badge.active { border-color: var(--ok); color: var(--ok); }
+  .of-stage-hint { font-size: 13px; color: var(--muted); flex: 1; }
+
+  .of-view { position: relative; background: #000; aspect-ratio: 3/4; overflow: hidden; touch-action: none; }
+  .of-view video, .of-view img, .of-view canvas { width: 100%; height: 100%; object-fit: contain; display: block; position: absolute; top: 0; left: 0; }
+  .of-crop-rect { position: absolute; border: 2px solid var(--amber); background: rgba(242,169,59,0.15); pointer-events: none; display: none; }
+  .of-view-hint { position: absolute; bottom: 10px; left: 10px; right: 10px; font-size: 13px; color: #fff; background: rgba(0,0,0,0.55); padding: 6px 10px; text-align: center; }
+
+  .of-controls { padding: 14px 18px; display: flex; align-items: center; justify-content: center; gap: 14px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
+  .of-shutter { width: 60px; height: 60px; border-radius: 50%; background: var(--amber); border: 4px solid #3a3d40; outline: 2px solid var(--amber); outline-offset: 3px; cursor: pointer; }
+  .of-shutter:disabled { background: var(--amber-dim); outline-color: var(--amber-dim); }
+
+  .of-ocr-box { padding: 14px 18px; border-bottom: 1px solid var(--border); }
+  .of-ocr-label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  input.of-ocr-input { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; font-weight: 700; background: var(--panel-2); border: 1px solid var(--border); color: var(--amber); padding: 10px; }
+  .of-hint { font-size: 13px; color: var(--ok); margin-top: 6px; }
+
+  .of-verdict { padding: 10px 14px; font-size: 14px; font-weight: 650; margin: 10px 0; border: 1px solid; }
+  .of-verdict.found { background: var(--panel-2); color: var(--amber); border-color: var(--amber-dim); }
+  .of-verdict.unregistered { background: var(--err-dim); color: var(--err); border-color: var(--err); }
+  .of-lookup { font-size: 13px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); padding: 10px; line-height: 1.6; }
+
+  .of-manual { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  input.of-reason { flex: 1; min-width: 140px; background: var(--panel-2); border: 1px solid var(--border); color: var(--text); padding: 8px; font-size: 13px; }
+
+  .of-log { padding: 14px 18px 40px; }
+  .of-log-item { display: flex; justify-content: space-between; align-items: center; padding: 9px 12px; background: var(--panel); border: 1px solid var(--border); margin-bottom: 6px; font-size: 13px; }
+  .of-log-tag { font-family: ui-monospace, monospace; font-weight: 650; color: var(--amber); }
+  .of-note { padding: 10px 18px 0; font-size: 13px; color: var(--muted); }
+  .of-error { padding: 12px; background: rgba(224,102,90,0.12); border: 1px solid var(--err); color: var(--err); font-size: 13px; margin: 14px 18px 0; }
+  .of-engine-status { font-size: 12px; color: var(--muted); padding: 8px 18px; }
+</style>
+
+<div id="of-root">
+<div class="of-shell">
+  <div class="of-header">
+    <p class="of-eyebrow">OFFLINE PANEL/TAG SCANNER</p>
+    <h1 class="of-title">오프라인 부품 검수 (AI 사용 안 함)</h1>
+    <p class="of-sub">휴대폰 안에서만 동작 — 인터넷·PC·사용한도 필요 없음(최초 로드 제외)</p>
+  </div>
+
+  <div class="of-engine-status" id="of-engine-status">OCR 엔진 준비 중…</div>
+
+  <div class="of-section">
+    <p class="of-section-title">기준 리스트 (BOM / TB LIST)</p>
+    <div class="of-status empty" id="of-list-status">아직 로드된 리스트가 없습니다</div>
+    <div class="of-row">
+      <input type="file" id="of-file-input" accept=".csv,.txt" style="font-size:13px; color: var(--muted);" />
+      <button class="of-btn" id="of-sample-list">샘플 리스트로 테스트</button>
+    </div>
+    <textarea class="of-paste" id="of-paste-area" placeholder="또는 CSV 붙여넣기 (TAG, PANEL 컬럼 자동 인식)"></textarea>
+    <div class="of-row" style="margin-top:8px;">
+      <button class="of-btn" id="of-paste-load">붙여넣은 내용 불러오기</button>
+    </div>
+    <div class="of-row" id="of-panel-select-row">
+      <label style="font-size:13px; color:var(--muted);">PANEL 선택(수동)</label>
+      <select id="of-panel-select"></select>
+    </div>
+  </div>
+
+  <div class="of-section" id="of-ai-settings-section">
+    <p class="of-section-title">AI 보조 인식 설정 (선택 — 오프라인 OCR이 안 읽힐 때만 사용)</p>
+    <div class="of-row">
+      <label style="font-size:13px; color:var(--muted);">AI 선택</label>
+      <select id="of-ai-provider">
+        <option value="claude">Claude</option>
+        <option value="openai">ChatGPT (OpenAI)</option>
+        <option value="gemini">Gemini (Google)</option>
+      </select>
+      <button class="of-btn ghost" id="of-ai-settings-toggle">API 키 설정 ▾</button>
+    </div>
+    <div id="of-ai-settings-body" style="display:none; margin-top:10px;">
+      <div class="of-row" style="margin-bottom:6px;">
+        <label style="width:80px; font-size:13px; color:var(--muted);">Claude 키</label>
+        <input type="password" id="of-key-claude" placeholder="sk-ant-..." style="flex:1; background:var(--panel-2); border:1px solid var(--border); color:var(--text); padding:6px 8px;" />
+        <input type="text" id="of-model-claude" placeholder="모델명" style="width:150px; background:var(--panel-2); border:1px solid var(--border); color:var(--muted); padding:6px 8px; font-size:12px;" />
+      </div>
+      <div class="of-row" style="margin-bottom:6px;">
+        <label style="width:80px; font-size:13px; color:var(--muted);">ChatGPT 키</label>
+        <input type="password" id="of-key-openai" placeholder="sk-..." style="flex:1; background:var(--panel-2); border:1px solid var(--border); color:var(--text); padding:6px 8px;" />
+        <input type="text" id="of-model-openai" placeholder="모델명" style="width:150px; background:var(--panel-2); border:1px solid var(--border); color:var(--muted); padding:6px 8px; font-size:12px;" />
+      </div>
+      <div class="of-row" style="margin-bottom:6px;">
+        <label style="width:80px; font-size:13px; color:var(--muted);">Gemini 키</label>
+        <input type="password" id="of-key-gemini" placeholder="AIza..." style="flex:1; background:var(--panel-2); border:1px solid var(--border); color:var(--text); padding:6px 8px;" />
+        <input type="text" id="of-model-gemini" placeholder="모델명" style="width:150px; background:var(--panel-2); border:1px solid var(--border); color:var(--muted); padding:6px 8px; font-size:12px;" />
+      </div>
+      <p class="of-note" style="padding:0; margin-top:6px;">⚠ 이 키들은 이 휴대폰 브라우저 안에만 저장되며(다른 곳으로 전송되지 않음), 개인용 기기에서만 사용하세요. 공용 기기에는 입력하지 마세요.</p>
+      <button class="of-btn" id="of-ai-settings-save" style="margin-top:6px;">저장</button>
+    </div>
+  </div>
+
+  <div class="of-stage-banner" id="of-stage-banner"></div>
+
+  <div class="of-view" id="of-view">
+    <video id="of-video" autoplay playsinline muted></video>
+    <img id="of-shot" style="display:none;" />
+    <div class="of-crop-rect" id="of-crop-rect"></div>
+    <div class="of-view-hint" id="of-view-hint" style="display:none;">정지 화면 위를 손가락으로 드래그해서 글자 부분만 선택하세요</div>
+  </div>
+
+  <div class="of-controls">
+    <button class="of-btn ghost" id="of-retake" style="display:none;">다시 촬영</button>
+    <button class="of-shutter" id="of-shutter" disabled></button>
+    <button class="of-btn ghost" id="of-switch-cam">전/후면</button>
+  </div>
+
+  <div id="of-error-slot"></div>
+
+  <div class="of-ocr-box" id="of-ocr-box" style="display:none;">
+    <div class="of-ocr-label">인식 결과 (틀리면 직접 수정)</div>
+    <input class="of-ocr-input" id="of-ocr-input" />
+    <div class="of-hint" id="of-ocr-hint"></div>
+    <div class="of-row" style="margin-top:8px;">
+      <button class="of-btn" id="of-ai-retry" style="flex:1;">🤖 선택한 AI로 다시 인식</button>
+    </div>
+    <button class="of-btn primary" id="of-confirm" style="width:100%; margin-top:10px;">이 값으로 확정</button>
+
+    <div id="of-verdict-slot"></div>
+
+    <div class="of-manual" id="of-manual-row" style="display:none;">
+      <button class="of-btn" id="of-mark-ok" style="color:var(--ok); border-color:var(--ok-dim);">✓ 확인/일치</button>
+      <button class="of-btn" id="of-mark-x" style="color:var(--err); border-color:var(--err-dim);">✕ 불일치</button>
+      <input class="of-reason" id="of-reason" placeholder="예: MAKER 상이" />
+    </div>
+  </div>
+
+  <div class="of-log" id="of-log" style="display:none;">
+    <p class="of-section-title">이번 세션 기록 (최신순)</p>
+    <div class="of-row" style="margin-bottom:10px;">
+      <button class="of-btn primary" id="of-export">📄 엑셀로 저장</button>
+    </div>
+    <div id="of-log-items"></div>
+  </div>
+
+  <p class="of-note" style="padding-bottom:20px;">※ 프로토타입 — OCR 정확도는 실제 명판/태그로 테스트가 필요합니다. 태그 부분만 드래그로 선택해서 인식하는 방식이 가장 정확합니다.</p>
+</div>
+</div>
+
+<script>
+(function () {
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function normKey(s) { return (s == null ? '' : String(s)).trim().toUpperCase().replace(/\s+/g, ''); }
+
+  // ---------- CSV parsing (same fixed logic as other tools) ----------
+  function splitCSVLine(line) {
+    const result = []; let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (inQ) { if (c === '"') { if (line[i+1] === '"') { cur += '"'; i++; } else inQ = false; } else cur += c; }
+      else { if (c === '"') inQ = true; else if (c === ',') { result.push(cur); cur = ''; } else cur += c; }
+    }
+    result.push(cur);
+    return result;
+  }
+  function parseCSV(text) {
+    const lines = text.split(/\r\n|\n/).filter(l => l.trim().length);
+    if (!lines.length) return { rows: [], headers: [] };
+    const headers = splitCSVLine(lines[0]).map(h => h.trim());
+    const rows = lines.slice(1).map(line => {
+      const cells = splitCSVLine(line);
+      const obj = {};
+      headers.forEach((h, i) => { obj[h] = (cells[i] || '').trim(); });
+      return obj;
+    });
+    return { rows, headers };
+  }
+  const PANEL_ALIASES = ['panel', 'panelno', 'panel_no', '판넬', '판넬번호', '패널', '패널번호'];
+  const TAG_ALIASES = ['tag', '선번호', 'wireno', 'wire_no', 'key', 'id'];
+  function findCol(headers, aliases, exclude) {
+    return headers.find(h => {
+      if (h === exclude) return false;
+      const hn = h.toLowerCase().replace(/[\s_]/g, '');
+      return aliases.some(a => hn.includes(a.replace(/[\s_]/g, '')));
+    }) || null;
+  }
+  function detectPanelCol(headers) { return findCol(headers, PANEL_ALIASES, null); }
+  function detectKeyCol(headers, panelCol) {
+    const tagCol = findCol(headers, TAG_ALIASES, panelCol);
+    if (tagCol) return tagCol;
+    return headers.find(h => h !== panelCol) || (headers[0] || null);
+  }
+  const FIELD_ALIASES = [
+    ['maker', ['maker', 'manufacturer', '제조사', '메이커']],
+    ['model_no', ['model', '모델']],
+    ['serial_no', ['serial', '시리얼']],
+    ['spec', ['spec', '사양', '규격', 'rating']]
+  ];
+  function rowField(row, key) {
+    if (!row) return null;
+    const aliases = (FIELD_ALIASES.find(f => f[0] === key) || [null, []])[1];
+    const col = Object.keys(row).find(c => {
+      const cn = c.toLowerCase().replace(/[\s_]/g, '');
+      return aliases.some(a => cn.includes(a.replace(/[\s_]/g, '')));
+    });
+    return col ? row[col] : null;
+  }
+
+  // ---------- state ----------
+  let refList = [], refKeyCol = null, refPanelCol = null, selectedPanel = null;
+  let sessionLog = [];
+  let correctionMemory = {};
+  let scanStage = 'panel'; // 'panel' | 'component'
+  let ocrEngineReady = false;
+  let tesseractWorker = null;
+  let rawOcrText = '';
+
+  const listStatusEl = document.getElementById('of-list-status');
+  const panelSelectRow = document.getElementById('of-panel-select-row');
+  const panelSelectEl = document.getElementById('of-panel-select');
+  const engineStatusEl = document.getElementById('of-engine-status');
+  const stageBanner = document.getElementById('of-stage-banner');
+  const errorSlot = document.getElementById('of-error-slot');
+
+  function showError(msg) { errorSlot.innerHTML = '<div class="of-error">' + escapeHtml(msg) + '</div>'; }
+  function clearError() { errorSlot.innerHTML = ''; }
+
+  // ---------- correction memory (persisted per-device) ----------
+  async function loadMemory() {
+    try {
+      const raw = localStorage.getItem('correction_memory');
+      correctionMemory = raw ? JSON.parse(raw) : {};
+    } catch (e) { correctionMemory = {}; }
+  }
+  async function saveMemory() {
+    try { localStorage.setItem('correction_memory', JSON.stringify(correctionMemory)); } catch (e) {}
+  }
+  function recordCorrection(raw, corrected) {
+    const k = normKey(raw), c = normKey(corrected);
+    if (k && c && k !== c) { correctionMemory[k] = c; saveMemory(); return true; }
+    return false;
+  }
+  function suggestFromMemory(raw) {
+    const k = normKey(raw);
+    if (!k) return null;
+    if (correctionMemory[k]) return correctionMemory[k];
+    // simple fuzzy: same length, 1-char difference
+    for (const key of Object.keys(correctionMemory)) {
+      if (Math.abs(key.length - k.length) <= 1 && levenshtein(key, k) <= 1) return correctionMemory[key];
+    }
+    return null;
+  }
+  function levenshtein(a, b) {
+    const dp = Array.from({ length: a.length + 1 }, (_, i) => [i].concat(Array(b.length).fill(0)));
+    for (let j = 0; j <= b.length; j++) dp[0][j] = j;
+    for (let i = 1; i <= a.length; i++) {
+      for (let j = 1; j <= b.length; j++) {
+        dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+      }
+    }
+    return dp[a.length][b.length];
+  }
+
+  // ---------- reference list ----------
+  function populatePanelSelect() {
+    if (!refPanelCol) { panelSelectRow.style.display = 'none'; panelSelectEl.innerHTML = ''; return; }
+    const values = Array.from(new Set(refList.map(r => (r[refPanelCol] || '').trim()).filter(Boolean))).sort();
+    panelSelectEl.innerHTML = '<option value="">-- 수동 선택 --</option>' +
+      values.map(v => '<option value="' + escapeHtml(v) + '">' + escapeHtml(v) + '</option>').join('');
+    panelSelectRow.style.display = 'flex';
+  }
+  panelSelectEl.addEventListener('change', (e) => {
+    const v = e.target.value;
+    if (v) { selectedPanel = v; scanStage = 'component'; updateStageUI(); }
+  });
+
+  function applyList(text) {
+    const { rows, headers } = parseCSV(text);
+    refList = rows;
+    refPanelCol = detectPanelCol(headers);
+    refKeyCol = detectKeyCol(headers, refPanelCol);
+    if (rows.length) {
+      listStatusEl.textContent = rows.length + '개 항목 로드됨 (키: ' + refKeyCol + (refPanelCol ? ', PANEL: ' + refPanelCol : '') + ')';
+      listStatusEl.classList.replace('empty', 'loaded');
+    } else {
+      listStatusEl.textContent = '리스트를 불러오지 못했습니다.';
+      listStatusEl.classList.replace('loaded', 'empty');
+    }
+    populatePanelSelect();
+  }
+  document.getElementById('of-file-input').addEventListener('change', (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => applyList(reader.result);
+    reader.readAsText(f, 'utf-8');
+  });
+  document.getElementById('of-paste-load').addEventListener('click', () => {
+    const t = document.getElementById('of-paste-area').value;
+    if (t.trim()) applyList(t);
+  });
+  document.getElementById('of-sample-list').addEventListener('click', () => {
+    const sample = 'PANEL,TAG,MAKER,MODEL_NO,SERIAL_NO,SPEC\n' +
+      'PNL-A1,1K2,LS ELECTRIC,MC-9b,SN-11234,AC220V 9A\n' +
+      'PNL-A1,2T1,Schneider,LC1D18,SN-88712,AC220V 18A\n' +
+      'PNL-B2,3F1,LS ELECTRIC,EBS33c,SN-55001,AC220V 32A\n';
+    document.getElementById('of-paste-area').value = sample;
+    applyList(sample);
+  });
+
+  function matchAgainstList(tag) {
+    if (!refList.length || !refKeyCol) return null;
+    let pool = refList;
+    if (refPanelCol && selectedPanel) pool = refList.filter(r => normKey(r[refPanelCol]) === normKey(selectedPanel));
+    const t = normKey(tag);
+    return pool.find(r => normKey(r[refKeyCol]) === t) || null;
+  }
+
+  // ---------- stage UI ----------
+  const stageEls = {};
+  function updateStageUI() {
+    if (scanStage === 'panel') {
+      stageBanner.innerHTML =
+        '<span class="of-stage-badge">1) PANEL 인식 대기</span>' +
+        '<span class="of-stage-hint">Panel 번호판을 촬영·선택해서 인식하거나, 위에서 수동으로 선택하세요.</span>';
+    } else {
+      const shown = selectedPanel || '(미지정)';
+      stageBanner.innerHTML =
+        '<span class="of-stage-badge active">PANEL: ' + escapeHtml(shown) + '</span>' +
+        '<span class="of-stage-hint">부품 TAG를 촬영해서 대조하세요</span>' +
+        '<button class="of-btn ghost" id="of-stage-reset">PANEL 다시 인식</button>';
+      document.getElementById('of-stage-reset').addEventListener('click', () => { scanStage = 'panel'; updateStageUI(); });
+    }
+  }
+
+  // ---------- camera ----------
+  const video = document.getElementById('of-video');
+  const shot = document.getElementById('of-shot');
+  const cropRect = document.getElementById('of-crop-rect');
+  const viewHint = document.getElementById('of-view-hint');
+  const shutterBtn = document.getElementById('of-shutter');
+  const retakeBtn = document.getElementById('of-retake');
+  const switchCamBtn = document.getElementById('of-switch-cam');
+  const ocrBox = document.getElementById('of-ocr-box');
+  const ocrInput = document.getElementById('of-ocr-input');
+  const ocrHint = document.getElementById('of-ocr-hint');
+  const verdictSlot = document.getElementById('of-verdict-slot');
+  const manualRow = document.getElementById('of-manual-row');
+  const reasonInput = document.getElementById('of-reason');
+  const logWrap = document.getElementById('of-log');
+  const logItems = document.getElementById('of-log-items');
+
+  let stream = null, facingMode = 'environment', frozen = false;
+  let dragStart = null, dragRect = null;
+
+  async function startCamera() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false
+      });
+      video.srcObject = stream;
+      video.style.display = 'block'; shot.style.display = 'none';
+      shutterBtn.disabled = false;
+    } catch (err) {
+      showError('카메라를 사용할 수 없습니다: ' + err.message);
+    }
+  }
+
+  shutterBtn.addEventListener('click', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    shot.src = canvas.toDataURL('image/jpeg', 0.9);
+    shot.dataset.w = canvas.width; shot.dataset.h = canvas.height;
+    shot.style.display = 'block'; video.style.display = 'none';
+    frozen = true;
+    retakeBtn.style.display = 'inline-block';
+    viewHint.style.display = 'block';
+    clearError();
+    ocrBox.style.display = 'none';
+    dragRect = null; cropRect.style.display = 'none';
+  });
+  retakeBtn.addEventListener('click', () => {
+    frozen = false; retakeBtn.style.display = 'none'; viewHint.style.display = 'none';
+    cropRect.style.display = 'none'; ocrBox.style.display = 'none';
+    shot.style.display = 'none'; video.style.display = 'block';
+  });
+  switchCamBtn.addEventListener('click', () => { facingMode = facingMode === 'environment' ? 'user' : 'environment'; startCamera(); });
+
+  // ---------- crop selection (pointer events: works for touch + mouse) ----------
+  const viewEl = document.getElementById('of-view');
+  viewEl.addEventListener('pointerdown', (e) => {
+    if (!frozen) return;
+    const r = viewEl.getBoundingClientRect();
+    dragStart = { x: e.clientX - r.left, y: e.clientY - r.top };
+    cropRect.style.display = 'block';
+    cropRect.style.left = dragStart.x + 'px'; cropRect.style.top = dragStart.y + 'px';
+    cropRect.style.width = '0px'; cropRect.style.height = '0px';
+  });
+  viewEl.addEventListener('pointermove', (e) => {
+    if (!frozen || !dragStart) return;
+    const r = viewEl.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    const left = Math.min(dragStart.x, x), top = Math.min(dragStart.y, y);
+    const w = Math.abs(x - dragStart.x), h = Math.abs(y - dragStart.y);
+    cropRect.style.left = left + 'px'; cropRect.style.top = top + 'px';
+    cropRect.style.width = w + 'px'; cropRect.style.height = h + 'px';
+    dragRect = { left, top, w, h, viewW: r.width, viewH: r.height };
+  });
+  viewEl.addEventListener('pointerup', () => { dragStart = null; });
+
+  function getCroppedCanvas() {
+    const naturalW = parseInt(shot.dataset.w || video.videoWidth, 10);
+    const naturalH = parseInt(shot.dataset.h || video.videoHeight, 10);
+    const canvas = document.createElement('canvas');
+    const img = new Image();
+    img.src = shot.src;
+    if (!dragRect || dragRect.w < 8 || dragRect.h < 8) {
+      canvas.width = naturalW; canvas.height = naturalH;
+      canvas.getContext('2d').drawImage(shot, 0, 0, naturalW, naturalH);
+      return canvas;
+    }
+    const sx = naturalW / dragRect.viewW, sy = naturalH / dragRect.viewH;
+    const cx = dragRect.left * sx, cy = dragRect.top * sy, cw = dragRect.w * sx, ch = dragRect.h * sy;
+    canvas.width = cw; canvas.height = ch;
+    canvas.getContext('2d').drawImage(shot, cx, cy, cw, ch, 0, 0, cw, ch);
+    return canvas;
+  }
+
+  // ---------- AI 보조 인식 (오프라인 OCR이 안 읽힐 때만 선택 사용) ----------
+  function loadAISettings() {
+    return {
+      provider: localStorage.getItem('ai_provider') || 'claude',
+      keys: {
+        claude: localStorage.getItem('ai_key_claude') || '',
+        openai: localStorage.getItem('ai_key_openai') || '',
+        gemini: localStorage.getItem('ai_key_gemini') || ''
+      },
+      models: {
+        claude: localStorage.getItem('ai_model_claude') || 'claude-sonnet-4-6',
+        openai: localStorage.getItem('ai_model_openai') || 'gpt-4o-mini',
+        gemini: localStorage.getItem('ai_model_gemini') || 'gemini-2.0-flash'
+      }
+    };
+  }
+  function saveAISettings(s) {
+    localStorage.setItem('ai_provider', s.provider);
+    localStorage.setItem('ai_key_claude', s.keys.claude);
+    localStorage.setItem('ai_key_openai', s.keys.openai);
+    localStorage.setItem('ai_key_gemini', s.keys.gemini);
+    localStorage.setItem('ai_model_claude', s.models.claude);
+    localStorage.setItem('ai_model_openai', s.models.openai);
+    localStorage.setItem('ai_model_gemini', s.models.gemini);
+  }
+
+  const aiProviderSelect = document.getElementById('of-ai-provider');
+  const aiSettingsToggle = document.getElementById('of-ai-settings-toggle');
+  const aiSettingsBody = document.getElementById('of-ai-settings-body');
+  const keyInputs = { claude: document.getElementById('of-key-claude'), openai: document.getElementById('of-key-openai'), gemini: document.getElementById('of-key-gemini') };
+  const modelInputs = { claude: document.getElementById('of-model-claude'), openai: document.getElementById('of-model-openai'), gemini: document.getElementById('of-model-gemini') };
+
+  (function initAISettingsUI() {
+    const s = loadAISettings();
+    aiProviderSelect.value = s.provider;
+    Object.keys(keyInputs).forEach(p => { keyInputs[p].value = s.keys[p]; modelInputs[p].value = s.models[p]; });
+  })();
+  aiProviderSelect.addEventListener('change', () => {
+    const s = loadAISettings(); s.provider = aiProviderSelect.value; saveAISettings(s);
+  });
+  aiSettingsToggle.addEventListener('click', () => {
+    const open = aiSettingsBody.style.display !== 'none';
+    aiSettingsBody.style.display = open ? 'none' : 'block';
+    aiSettingsToggle.textContent = open ? 'API 키 설정 ▾' : 'API 키 설정 ▴';
+  });
+  document.getElementById('of-ai-settings-save').addEventListener('click', () => {
+    const s = loadAISettings();
+    Object.keys(keyInputs).forEach(p => { s.keys[p] = keyInputs[p].value.trim(); s.models[p] = modelInputs[p].value.trim() || s.models[p]; });
+    saveAISettings(s);
+    alert('저장되었습니다.');
+  });
+
+  async function callClaude(apiKey, model, base64, prompt) {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true'
+      },
+      body: JSON.stringify({
+        model, max_tokens: 300,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64 } },
+          { type: 'text', text: prompt }
+        ] }]
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message || 'Claude API 오류');
+    const block = (data.content || []).find(b => b.type === 'text');
+    return block ? block.text.trim() : '';
+  }
+
+  async function callOpenAI(apiKey, model, base64, prompt) {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + apiKey },
+      body: JSON.stringify({
+        model, max_tokens: 300,
+        messages: [{ role: 'user', content: [
+          { type: 'text', text: prompt },
+          { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + base64 } }
+        ] }]
+      })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message || 'OpenAI API 오류');
+    return ((data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || '').trim();
+  }
+
+  async function callGemini(apiKey, model, base64, prompt) {
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(apiKey);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [ { text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: base64 } } ] }] })
+    });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error.message || 'Gemini API 오류');
+    const cand = data.candidates && data.candidates[0];
+    const parts = (cand && cand.content && cand.content.parts) || [];
+    return parts.map(p => p.text || '').join('').trim();
+  }
+
+  async function callAI(provider, apiKey, model, base64, prompt) {
+    if (provider === 'claude') return callClaude(apiKey, model, base64, prompt);
+    if (provider === 'openai') return callOpenAI(apiKey, model, base64, prompt);
+    if (provider === 'gemini') return callGemini(apiKey, model, base64, prompt);
+    throw new Error('알 수 없는 AI입니다.');
+  }
+
+  document.getElementById('of-ai-retry').addEventListener('click', async () => {
+    const s = loadAISettings();
+    const provider = aiProviderSelect.value;
+    const apiKey = s.keys[provider];
+    if (!apiKey) { showError('먼저 "API 키 설정"에서 ' + provider + ' 키를 입력하고 저장해주세요.'); return; }
+    clearError();
+    const btn = document.getElementById('of-ai-retry');
+    btn.disabled = true; btn.textContent = '🤖 AI 인식 중…';
+    try {
+      const canvas = getCroppedCanvas();
+      const base64 = canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+      const prompt = '이 이미지 안의 문자(부품 태그 번호, 선번호, 또는 Panel 번호)를 정확히 읽어서 그 텍스트만 한 줄로 답하세요. 다른 설명이나 문장부호 없이 인식된 문자열만 출력하세요.';
+      const text = (await callAI(provider, apiKey, s.models[provider], base64, prompt)).replace(/\s+/g, '').trim();
+      if (text) {
+        ocrInput.value = text;
+        ocrHint.textContent = provider + ' AI 인식 결과: "' + text + '" (틀렸으면 직접 수정 가능)';
+      } else {
+        ocrHint.textContent = 'AI도 글자를 읽지 못했습니다. 값을 직접 입력해주세요.';
+      }
+    } catch (e) {
+      showError('AI 인식 중 오류: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = '🤖 선택한 AI로 다시 인식';
+    }
+  });
+
+  // ---------- OCR engine (Tesseract.js) ----------
+  async function initEngine() {
+    try {
+      if (typeof Tesseract === 'undefined') {
+        engineStatusEl.textContent = 'OCR 엔진을 불러오지 못했습니다 (네트워크 확인 필요)';
+        return;
+      }
+      engineStatusEl.textContent = 'OCR 엔진 다운로드 중… (최초 1회만, 몇 MB)';
+      tesseractWorker = await Tesseract.createWorker('eng');
+      ocrEngineReady = true;
+      engineStatusEl.textContent = 'OCR 엔진 준비 완료 (오프라인 인식 가능)';
+    } catch (e) {
+      engineStatusEl.textContent = 'OCR 엔진 초기화 실패: ' + e.message;
+    }
+  }
+
+  document.getElementById('of-shutter').insertAdjacentHTML; // no-op guard (avoid tree-shaking removal)
+
+  async function runOcrOnCrop() {
+    if (!ocrEngineReady || !tesseractWorker) { showError('OCR 엔진이 아직 준비되지 않았습니다. 잠시 후 다시 시도해주세요.'); return; }
+    clearError();
+    ocrBox.style.display = 'block';
+    ocrInput.value = '인식 중…';
+    ocrHint.textContent = '';
+    verdictSlot.innerHTML = ''; manualRow.style.display = 'none';
+    try {
+      const canvas = getCroppedCanvas();
+      const { data: { text } } = await tesseractWorker.recognize(canvas);
+      const raw = (text || '').replace(/\s+/g, '').trim();
+      rawOcrText = raw;
+      const suggestion = suggestFromMemory(raw);
+      if (suggestion) {
+        ocrInput.value = suggestion;
+        ocrHint.textContent = '교정 기억에서 자동 보정됨: "' + raw + '" → "' + suggestion + '"';
+      } else {
+        ocrInput.value = raw;
+        ocrHint.textContent = raw ? 'OCR 원문: "' + raw + '" (틀렸으면 위에서 수정)' : '글자를 읽지 못했습니다. 영역을 더 크게/선명하게 다시 선택해보세요.';
+      }
+    } catch (e) {
+      showError('OCR 처리 중 오류: ' + e.message);
+      ocrInput.value = '';
+    }
+  }
+
+  // trigger OCR right after a crop selection is finalized on touch/mouse release
+  viewEl.addEventListener('pointerup', () => {
+    if (frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
+      runOcrOnCrop();
+    }
+  });
+  // also allow OCR on the whole frozen frame via a tap without dragging (fallback)
+  viewEl.addEventListener('dblclick', () => { if (frozen) { dragRect = null; runOcrOnCrop(); } });
+
+  // ---------- confirm / match ----------
+  let currentValue = '', currentRow = null;
+
+  document.getElementById('of-confirm').addEventListener('click', () => {
+    const finalText = ocrInput.value.trim();
+    if (!finalText) { showError('값이 비어 있습니다.'); return; }
+    if (recordCorrection(rawOcrText, finalText)) {
+      ocrHint.textContent = '교정 내용을 학습했습니다 (다음에 비슷한 오독 시 자동 제안됩니다).';
+    }
+    currentValue = finalText;
+
+    if (scanStage === 'panel') {
+      let matched = null;
+      if (refPanelCol) {
+        const target = normKey(finalText);
+        matched = refList.map(r => r[refPanelCol]).find(v => normKey(v) === target);
+      }
+      selectedPanel = matched || finalText;
+      scanStage = 'component';
+      updateStageUI();
+      verdictSlot.innerHTML = '<div class="of-verdict found">PANEL: ' + escapeHtml(selectedPanel) + ' 로 설정되었습니다. 이제 부품 TAG를 촬영하세요.</div>';
+      manualRow.style.display = 'none';
+      return;
+    }
+
+    const row = matchAgainstList(finalText);
+    currentRow = row;
+    if (row) {
+      let lookup = '<div class="of-lookup">';
+      Object.keys(row).forEach(k => { lookup += escapeHtml(k) + ': ' + escapeHtml(row[k]) + '<br>'; });
+      lookup += '</div>';
+      verdictSlot.innerHTML =
+        '<div class="of-verdict found">TAG "' + escapeHtml(finalText) + '" 리스트에서 찾음 — 아래 등록값과 실물 명판을 육안 비교 후 확인/불일치를 눌러주세요.</div>' + lookup;
+    } else {
+      verdictSlot.innerHTML = '<div class="of-verdict unregistered">TAG "' + escapeHtml(finalText) + '" 이(가) 리스트에 없습니다 (미등록)</div>';
+    }
+    manualRow.style.display = 'flex';
+  });
+
+  function saveLogEntry(confirmText, mismatchText) {
+    const rec = {
+      시간: new Date().toLocaleString('ko-KR'),
+      PANEL: selectedPanel || '',
+      TAG: currentValue,
+      '확인/일치': confirmText,
+      '불일치 사유': mismatchText,
+      MAKER: currentRow ? (rowField(currentRow, 'maker') || '') : '',
+      MODEL_NO: currentRow ? (rowField(currentRow, 'model_no') || '') : '',
+      SERIAL_NO: currentRow ? (rowField(currentRow, 'serial_no') || '') : '',
+      SPEC: currentRow ? (rowField(currentRow, 'spec') || '') : ''
+    };
+    sessionLog.unshift(rec);
+    renderLog();
+  }
+  document.getElementById('of-mark-ok').addEventListener('click', () => { saveLogEntry('확인', ''); manualRow.style.display = 'none'; });
+  document.getElementById('of-mark-x').addEventListener('click', () => {
+    const reason = reasonInput.value.trim() || (currentRow ? '불일치' : 'TAG 미등록');
+    saveLogEntry('', reason);
+    manualRow.style.display = 'none';
+    reasonInput.value = '';
+  });
+
+  function renderLog() {
+    if (!sessionLog.length) { logWrap.style.display = 'none'; return; }
+    logWrap.style.display = 'block';
+    logItems.innerHTML = sessionLog.slice(0, 40).map(r => {
+      const okLabel = r['확인/일치'] ? '<span style="color:var(--ok); font-weight:700;">OK</span>' : '<span style="color:var(--err); font-weight:700;">X</span>';
+      return '<div class="of-log-item"><span><span class="of-log-tag">' + escapeHtml(r.TAG) + '</span> ' + okLabel + '</span>' +
+        '<span style="color:var(--muted);">' + escapeHtml(r['불일치 사유'] || r.PANEL) + '</span></div>';
+    }).join('');
+  }
+
+  document.getElementById('of-export').addEventListener('click', () => {
+    if (!sessionLog.length) { alert('내보낼 기록이 없습니다.'); return; }
+    const fields = ['시간','PANEL','TAG','확인/일치','불일치 사유','MAKER','MODEL_NO','SERIAL_NO','SPEC'];
+    if (window.XLSX) {
+      const ws = XLSX.utils.json_to_sheet(sessionLog, { header: fields });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'BOM_Check');
+      XLSX.writeFile(wb, 'bom_check_offline_' + Date.now() + '.xlsx');
+    } else {
+      const csv = [fields.join(',')].concat(sessionLog.map(r => fields.map(f => '"' + String(r[f]||'').replace(/"/g,'""') + '"').join(','))).join('\n');
+      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'bom_check_offline_' + Date.now() + '.csv'; a.click();
+    }
+  });
+
+  // ---------- init ----------
+  updateStageUI();
+  loadMemory();
+  startCamera();
+  initEngine();
+})();
+</script>
+
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./sw.js').catch(() => {});
+    });
+  }
+</script>
+</body>
+</html>

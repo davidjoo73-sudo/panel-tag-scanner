@@ -1,0 +1,17 @@
+{
+  "name": "Panel/TAG 오프라인 검수",
+  "short_name": "TAG검수",
+  "description": "AI 사용 없이 휴대폰에서 오프라인으로 부품 TAG를 인식하고 BOM/TB LIST와 대조하는 앱",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#14171a",
+  "theme_color": "#14171a",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
