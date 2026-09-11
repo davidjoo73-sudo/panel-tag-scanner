@@ -96,7 +96,7 @@
     <p class="of-section-title">기준 리스트 (BOM / TB LIST)</p>
     <div class="of-status empty" id="of-list-status">아직 로드된 리스트가 없습니다</div>
     <div class="of-row">
-      <input type="file" id="of-file-input" accept=".csv,.txt" style="font-size:13px; color: var(--muted);" />
+      <input type="file" id="of-file-input" accept=".csv,.txt,.xlsx,.xls" style="font-size:13px; color: var(--muted);" />
       <button class="of-btn" id="of-sample-list">샘플 리스트로 테스트</button>
     </div>
     <textarea class="of-paste" id="of-paste-area" placeholder="또는 CSV 붙여넣기 (TAG, PANEL 컬럼 자동 인식)"></textarea>
@@ -317,8 +317,7 @@
     if (v) { selectedPanel = v; scanStage = 'component'; updateStageUI(); }
   });
 
-  function applyList(text) {
-    const { rows, headers } = parseCSV(text);
+  function applyRows(rows, headers) {
     refList = rows;
     refPanelCol = detectPanelCol(headers);
     refKeyCol = detectKeyCol(headers, refPanelCol);
@@ -331,11 +330,48 @@
     }
     populatePanelSelect();
   }
+
+  function applyList(text) {
+    const { rows, headers } = parseCSV(text);
+    applyRows(rows, headers);
+  }
+
+  function applyWorkbookArrayBuffer(buffer) {
+    if (typeof XLSX === 'undefined') {
+      listStatusEl.textContent = '엑셀 처리 라이브러리를 불러오지 못했습니다 (네트워크 확인 필요). CSV로 시도해주세요.';
+      listStatusEl.classList.replace('loaded', 'empty');
+      return;
+    }
+    try {
+      const wb = XLSX.read(buffer, { type: 'array' });
+      const firstSheetName = wb.SheetNames[0];
+      const sheet = wb.Sheets[firstSheetName];
+      const rows = XLSX.utils.sheet_to_json(sheet, { defval: '', raw: false });
+      const headers = rows.length ? Object.keys(rows[0]) : (XLSX.utils.sheet_to_json(sheet, { header: 1 })[0] || []);
+      // 값들을 문자열로 통일(다른 로직들이 문자열 비교를 전제로 함)
+      const normRows = rows.map(r => {
+        const o = {};
+        Object.keys(r).forEach(k => { o[k] = r[k] == null ? '' : String(r[k]); });
+        return o;
+      });
+      applyRows(normRows, headers);
+    } catch (e) {
+      listStatusEl.textContent = '엑셀 파일을 읽지 못했습니다: ' + e.message;
+      listStatusEl.classList.replace('loaded', 'empty');
+    }
+  }
+
   document.getElementById('of-file-input').addEventListener('change', (e) => {
     const f = e.target.files[0]; if (!f) return;
+    const isExcel = /\.(xlsx|xls)$/i.test(f.name);
     const reader = new FileReader();
-    reader.onload = () => applyList(reader.result);
-    reader.readAsText(f, 'utf-8');
+    if (isExcel) {
+      reader.onload = () => applyWorkbookArrayBuffer(reader.result);
+      reader.readAsArrayBuffer(f);
+    } else {
+      reader.onload = () => applyList(reader.result);
+      reader.readAsText(f, 'utf-8');
+    }
   });
   document.getElementById('of-paste-load').addEventListener('click', () => {
     const t = document.getElementById('of-paste-area').value;
