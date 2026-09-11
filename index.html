@@ -95,13 +95,9 @@
   <div class="of-section">
     <p class="of-section-title">기준 리스트 (BOM / TB LIST)</p>
     <div class="of-status empty" id="of-list-status">아직 로드된 리스트가 없습니다</div>
+    <div id="of-list-meta" style="font-size:12px; color:var(--amber); margin-bottom:8px; display:none;"></div>
     <div class="of-row">
       <input type="file" id="of-file-input" accept=".csv,.txt,.xlsx,.xls" style="font-size:13px; color: var(--muted);" />
-      <button class="of-btn" id="of-sample-list">샘플 리스트로 테스트</button>
-    </div>
-    <textarea class="of-paste" id="of-paste-area" placeholder="또는 CSV 붙여넣기 (TAG, PANEL 컬럼 자동 인식)"></textarea>
-    <div class="of-row" style="margin-top:8px;">
-      <button class="of-btn" id="of-paste-load">붙여넣은 내용 불러오기</button>
     </div>
     <div class="of-row" id="of-panel-select-row">
       <label style="font-size:13px; color:var(--muted);">PANEL 선택(수동)</label>
@@ -179,7 +175,8 @@
   <div class="of-log" id="of-log" style="display:none;">
     <p class="of-section-title">이번 세션 기록 (최신순)</p>
     <div class="of-row" style="margin-bottom:10px;">
-      <button class="of-btn primary" id="of-export">📄 엑셀로 저장</button>
+      <button class="of-btn primary" id="of-export">📄 검사한 것만 엑셀로</button>
+      <button class="of-btn primary" id="of-export-full">📋 BM LIST 전체 + 검사결과</button>
       <button class="of-btn" id="of-import-btn">📥 이전 파일 불러오기</button>
       <input type="file" id="of-import-input" accept=".csv,.xlsx,.xls" style="display:none;" />
       <button class="of-btn ghost" id="of-clear-log" style="color:var(--err); border-color:var(--err-dim);">🗑 기록 삭제</button>
@@ -253,7 +250,7 @@
   }
 
   // ---------- state ----------
-  let refList = [], refKeyCol = null, refPanelCol = null, selectedPanel = null;
+  let refList = [], refHeaders = [], refKeyCol = null, refPanelCol = null, selectedPanel = null;
   let sessionLog = [];
   let correctionMemory = {};
   let scanStage = 'panel'; // 'panel' | 'component'
@@ -262,6 +259,7 @@
   let rawOcrText = '';
 
   const listStatusEl = document.getElementById('of-list-status');
+  const listMetaEl = document.getElementById('of-list-meta');
   const panelSelectRow = document.getElementById('of-panel-select-row');
   const panelSelectEl = document.getElementById('of-panel-select');
   const engineStatusEl = document.getElementById('of-engine-status');
@@ -320,8 +318,34 @@
     if (v) { selectedPanel = v; scanStage = 'component'; updateStageUI(); }
   });
 
-  function applyRows(rows, headers) {
+  function renderListMeta(meta) {
+    if (!meta || !meta.fileName) { listMetaEl.style.display = 'none'; return; }
+    listMetaEl.style.display = 'block';
+    listMetaEl.textContent = '📄 현재 리스트: ' + meta.fileName + ' (불러온 시각: ' + meta.loadedAt + ')';
+  }
+  function saveListToStorage(rows, headers, meta) {
+    try {
+      localStorage.setItem('ref_list_rows', JSON.stringify(rows));
+      localStorage.setItem('ref_list_headers', JSON.stringify(headers));
+      localStorage.setItem('ref_list_meta', JSON.stringify(meta));
+    } catch (e) {}
+  }
+  function loadListFromStorage() {
+    try {
+      const rowsRaw = localStorage.getItem('ref_list_rows');
+      const headersRaw = localStorage.getItem('ref_list_headers');
+      const metaRaw = localStorage.getItem('ref_list_meta');
+      if (!rowsRaw) return;
+      const rows = JSON.parse(rowsRaw);
+      const headers = headersRaw ? JSON.parse(headersRaw) : (rows.length ? Object.keys(rows[0]) : []);
+      const meta = metaRaw ? JSON.parse(metaRaw) : null;
+      applyRows(rows, headers, meta, true);
+    } catch (e) {}
+  }
+
+  function applyRows(rows, headers, meta, skipSave) {
     refList = rows;
+    refHeaders = headers;
     refPanelCol = detectPanelCol(headers);
     refKeyCol = detectKeyCol(headers, refPanelCol);
     if (rows.length) {
@@ -332,11 +356,13 @@
       listStatusEl.classList.replace('loaded', 'empty');
     }
     populatePanelSelect();
+    renderListMeta(meta);
+    if (!skipSave) saveListToStorage(rows, headers, meta);
   }
 
-  function applyList(text) {
+  function applyList(text, meta) {
     const { rows, headers } = parseCSV(text);
-    applyRows(rows, headers);
+    applyRows(rows, headers, meta);
   }
 
   function sheetToRowsSmart(sheet) {
@@ -353,7 +379,7 @@
     return { rows, headers };
   }
 
-  function applyWorkbookArrayBuffer(buffer) {
+  function applyWorkbookArrayBuffer(buffer, meta) {
     if (typeof XLSX === 'undefined') {
       listStatusEl.textContent = '엑셀 처리 라이브러리를 불러오지 못했습니다 (네트워크 확인 필요). CSV로 시도해주세요.';
       listStatusEl.classList.replace('loaded', 'empty');
@@ -364,7 +390,7 @@
       const firstSheetName = wb.SheetNames[0];
       const sheet = wb.Sheets[firstSheetName];
       const { rows: normRows, headers } = sheetToRowsSmart(sheet);
-      applyRows(normRows, headers);
+      applyRows(normRows, headers, meta);
     } catch (e) {
       listStatusEl.textContent = '엑셀 파일을 읽지 못했습니다: ' + e.message;
       listStatusEl.classList.replace('loaded', 'empty');
@@ -373,29 +399,17 @@
 
   document.getElementById('of-file-input').addEventListener('change', (e) => {
     const f = e.target.files[0]; if (!f) return;
+    const meta = { fileName: f.name, loadedAt: new Date().toLocaleString('ko-KR') };
     const isExcel = /\.(xlsx|xls)$/i.test(f.name);
     const reader = new FileReader();
     if (isExcel) {
-      reader.onload = () => applyWorkbookArrayBuffer(reader.result);
+      reader.onload = () => applyWorkbookArrayBuffer(reader.result, meta);
       reader.readAsArrayBuffer(f);
     } else {
-      reader.onload = () => applyList(reader.result);
+      reader.onload = () => applyList(reader.result, meta);
       reader.readAsText(f, 'utf-8');
     }
   });
-  document.getElementById('of-paste-load').addEventListener('click', () => {
-    const t = document.getElementById('of-paste-area').value;
-    if (t.trim()) applyList(t);
-  });
-  document.getElementById('of-sample-list').addEventListener('click', () => {
-    const sample = 'PANEL,TAG,MAKER,MODEL_NO,SERIAL_NO,SPEC\n' +
-      'PNL-A1,1K2,LS ELECTRIC,MC-9b,SN-11234,AC220V 9A\n' +
-      'PNL-A1,2T1,Schneider,LC1D18,SN-88712,AC220V 18A\n' +
-      'PNL-B2,3F1,LS ELECTRIC,EBS33c,SN-55001,AC220V 32A\n';
-    document.getElementById('of-paste-area').value = sample;
-    applyList(sample);
-  });
-
   function matchAgainstList(tag) {
     if (!refList.length || !refKeyCol) return null;
     let pool = refList;
@@ -812,6 +826,45 @@
     }
   });
 
+  document.getElementById('of-export-full').addEventListener('click', () => {
+    if (!refList.length) { alert('먼저 BM/TB LIST를 불러와주세요.'); return; }
+    // TAG(+PANEL) 기준으로 가장 최근 스캔 기록을 찾아 매칭 (sessionLog는 최신순 정렬되어 있음)
+    function findScan(row) {
+      const tagVal = refKeyCol ? row[refKeyCol] : null;
+      if (!tagVal) return null;
+      const tagNorm = normKey(tagVal);
+      const panelNorm = refPanelCol ? normKey(row[refPanelCol]) : null;
+      return sessionLog.find(s => {
+        if (normKey(s.TAG) !== tagNorm) return false;
+        if (panelNorm && s.PANEL && normKey(s.PANEL) !== panelNorm) return false;
+        return true;
+      }) || null;
+    }
+    const outHeaders = refHeaders.concat(['확인/일치', '불일치 사유', '검사일시']);
+    const outRows = refList.map(row => {
+      const scan = findScan(row);
+      const o = {};
+      refHeaders.forEach(h => { o[h] = row[h] != null ? row[h] : ''; });
+      o['확인/일치'] = scan ? (scan['확인/일치'] || '') : '';
+      o['불일치 사유'] = scan ? (scan['불일치 사유'] || '') : '';
+      o['검사일시'] = scan ? (scan['시간'] || '') : '';
+      return o;
+    });
+    const checkedCount = outRows.filter(r => r['확인/일치'] || r['불일치 사유']).length;
+    if (window.XLSX) {
+      const ws = XLSX.utils.json_to_sheet(outRows, { header: outHeaders });
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'BM_List_검사결과');
+      XLSX.writeFile(wb, 'BM_List_검사결과_' + Date.now() + '.xlsx');
+    } else {
+      const csv = [outHeaders.join(',')].concat(outRows.map(r => outHeaders.map(h => '"' + String(r[h]||'').replace(/"/g,'""') + '"').join(','))).join('\n');
+      const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = 'BM_List_검사결과_' + Date.now() + '.csv'; a.click();
+    }
+    alert('전체 ' + outRows.length + '행 중 ' + checkedCount + '행에 검사결과가 채워졌습니다. 나머지는 아직 스캔 안 한 항목입니다.');
+  });
+
   document.getElementById('of-clear-log').addEventListener('click', () => {
     if (!sessionLog.length) { alert('삭제할 기록이 없습니다.'); return; }
     const ok = confirm('PC로 옮기셨나요?\n\n"기록 삭제"를 누르면 이 휴대폰에 저장된 ' + sessionLog.length + '건이 모두 지워지고 복구할 수 없습니다.\n계속할까요?');
@@ -867,6 +920,7 @@
   updateStageUI();
   loadMemory();
   loadSessionLogFromStorage();
+  loadListFromStorage();
   startCamera();
   initEngine();
 })();
