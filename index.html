@@ -919,8 +919,6 @@
   }
 
   document.getElementById('of-auto-scan').addEventListener('click', async () => {
-    if (!ocrEngineReady || !tesseractWorker) { showError('OCR 엔진이 아직 준비되지 않았습니다.'); return; }
-    if (!refList.length) { showError('먼저 BM/TB LIST를 불러와주세요.'); return; }
     clearError();
     multiStatusEl.style.display = 'block';
     multiStatusEl.textContent = '전체 스캔 중… (QR + 태그 자동 인식, 몇 초 걸릴 수 있습니다)';
@@ -936,8 +934,10 @@
 
       let candidates = [];
 
-      // 1) QR 코드 우선 시도
-      if (typeof jsQR !== 'undefined') {
+      // 1) QR 코드 우선 시도 — OCR 엔진/리스트 준비 여부와 무관하게 항상 바로 시도한다.
+      if (typeof jsQR === 'undefined') {
+        showError('QR 인식 라이브러리를 아직 불러오지 못했습니다 (네트워크 확인 필요). 잠시 후 다시 시도해주세요.');
+      } else {
         try {
           const imgData = ctx.getImageData(0, 0, sw, sh);
           const code = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
@@ -945,8 +945,10 @@
         } catch (e) { /* QR 실패는 무시하고 계속 진행 */ }
       }
 
-      // 2) 손가락으로 선택한 영역이 있으면 그 부분도 우선 인식해서 후보에 추가
-      if (frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
+      // 2) OCR 기반 인식(선택영역 + 판넬 전체)은 엔진이 준비된 경우에만 추가로 시도한다.
+      const ocrAvailable = ocrEngineReady && tesseractWorker;
+
+      if (ocrAvailable && frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
         try {
           const cropCanvas = preprocessForOCR(getCroppedCanvas());
           const { data: cropData } = await tesseractWorker.recognize(cropCanvas);
@@ -955,36 +957,43 @@
         } catch (e) { /* 실패해도 전체 스캔은 계속 진행 */ }
       }
 
-      // 3) 화면 전체를 훑어서 리스트와 일치하는 태그 후보를 찾음
-      const pre = preprocessForOCR(canvas);
-      await tesseractWorker.setParameters({ tessedit_pageseg_mode: '11' }); // 희소 텍스트 모드(여러 조각을 흩어서 찾음)
-      const { data } = await tesseractWorker.recognize(pre);
-      await tesseractWorker.setParameters({ tessedit_pageseg_mode: '6' }); // 단일 태그 인식용 기본값으로 복구
+      if (ocrAvailable && refList.length) {
+        const pre = preprocessForOCR(canvas);
+        await tesseractWorker.setParameters({ tessedit_pageseg_mode: '11' }); // 희소 텍스트 모드(여러 조각을 흩어서 찾음)
+        const { data } = await tesseractWorker.recognize(pre);
+        await tesseractWorker.setParameters({ tessedit_pageseg_mode: '6' }); // 단일 태그 인식용 기본값으로 복구
 
-      const rawWords = (data.words || []);
-      const individualTokens = rawWords.map(w => ({ text: w.text, bbox: w.bbox })).filter(t => t.text);
-      const clusteredTokens = clusterWordsIntoLabels(rawWords);
-      const tokens = clusteredTokens.length
-        ? clusteredTokens.concat(individualTokens) // 합쳐진 형태를 우선 시도하고, 개별 단어도 보조로 시도
-        : (individualTokens.length ? individualTokens : (data.text || '').split(/\s+/).filter(Boolean).map(t => ({ text: t, bbox: null })));
+        const rawWords = (data.words || []);
+        const individualTokens = rawWords.map(w => ({ text: w.text, bbox: w.bbox })).filter(t => t.text);
+        const clusteredTokens = clusterWordsIntoLabels(rawWords);
+        const tokens = clusteredTokens.length
+          ? clusteredTokens.concat(individualTokens) // 합쳐진 형태를 우선 시도하고, 개별 단어도 보조로 시도
+          : (individualTokens.length ? individualTokens : (data.text || '').split(/\s+/).filter(Boolean).map(t => ({ text: t, bbox: null })));
 
-      const seen = new Set(candidates.filter(c => c.row).map(c => normKey(c.row[refKeyCol])));
-      let ocrCandidates = [];
-      tokens.forEach((tok) => {
-        const row = fuzzyFindInList(tok.text);
-        if (row) {
-          const key = normKey(row[refKeyCol]);
-          if (!seen.has(key)) { seen.add(key); ocrCandidates.push({ raw: tok.text, row, bbox: tok.bbox, kind: 'TAG' }); }
-        }
-      });
-      ocrCandidates = sortInReadingOrder(ocrCandidates);
-      candidates = candidates.concat(ocrCandidates);
+        const seen = new Set(candidates.filter(c => c.row).map(c => normKey(c.row[refKeyCol])));
+        let ocrCandidates = [];
+        tokens.forEach((tok) => {
+          const row = fuzzyFindInList(tok.text);
+          if (row) {
+            const key = normKey(row[refKeyCol]);
+            if (!seen.has(key)) { seen.add(key); ocrCandidates.push({ raw: tok.text, row, bbox: tok.bbox, kind: 'TAG' }); }
+          }
+        });
+        ocrCandidates = sortInReadingOrder(ocrCandidates);
+        candidates = candidates.concat(ocrCandidates);
+      }
 
       multiCandidates = candidates;
       multiIndex = 0;
       inMultiReview = candidates.length > 0;
       if (!candidates.length) {
-        multiStatusEl.textContent = '아무 것도 찾지 못했습니다. 더 가깝고 선명하게 다시 시도해보세요.';
+        if (!ocrAvailable) {
+          multiStatusEl.textContent = 'QR을 찾지 못했습니다. OCR 엔진이 아직 준비 중이라 태그 인식은 건너뛰었습니다 — 잠시 후 다시 눌러보세요.';
+        } else if (!refList.length) {
+          multiStatusEl.textContent = 'QR을 찾지 못했고, BM/TB LIST가 없어 태그 대조도 되지 않았습니다. 리스트를 불러온 뒤 다시 시도해주세요.';
+        } else {
+          multiStatusEl.textContent = '아무 것도 찾지 못했습니다. 더 가깝고 선명하게 다시 시도해보세요.';
+        }
       } else {
         multiStatusEl.textContent = candidates.length + '개 발견(QR/선택영역/태그 포함) — 아래에서 하나씩 확인하세요.';
         showNextMultiCandidate();
