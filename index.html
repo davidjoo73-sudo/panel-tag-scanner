@@ -153,6 +153,10 @@
     <button class="of-btn ghost" id="of-switch-cam">전/후면</button>
   </div>
   <div class="of-controls" style="padding-top:0;">
+    <button class="of-btn" id="of-import-photo" style="width:100%;">📷 기본 카메라 앱으로 고화질 사진 불러오기</button>
+    <input type="file" id="of-import-photo-input" accept="image/*" style="display:none;" />
+  </div>
+  <div class="of-controls" style="padding-top:0;">
     <button class="of-btn primary" id="of-auto-scan" style="width:100%;">🔍 전체 스캔 (QR + 태그 자동 인식)</button>
   </div>
   <div id="of-multi-status" style="display:none; padding: 8px 18px; font-size:13px; color:var(--amber);"></div>
@@ -523,8 +527,17 @@
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
     try {
+      // 휴대폰 기본 카메라 앱 수준의 해상도를 요청한다(예전엔 1280x1280으로 낮게 고정돼 있어서
+      // 작은 태그 글자를 크롭하면 원본부터 흐릿했다). ideal은 상한 힌트일 뿐이라, 기기가
+      // 이보다 낮은 해상도만 지원해도 에러 없이 지원 가능한 최대치로 알아서 맞춰진다.
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 4032 },
+          height: { ideal: 3024 },
+          advanced: [{ focusMode: 'continuous' }]
+        },
+        audio: false
       });
       video.srcObject = stream;
       video.style.display = 'block'; shot.style.display = 'none';
@@ -534,11 +547,10 @@
     }
   }
 
-  shutterBtn.addEventListener('click', () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    shot.src = canvas.toDataURL('image/jpeg', 0.9);
+  // 정지 화면(shot)을 특정 캔버스 내용으로 고정한다. 라이브 카메라에서 촬영했든,
+  // 기본 카메라 앱에서 불러온 고화질 사진이든 이후 처리(크롭/OCR)는 완전히 동일하게 동작한다.
+  function freezeFromCanvas(canvas) {
+    shot.src = canvas.toDataURL('image/jpeg', 0.92);
     shot.dataset.w = canvas.width; shot.dataset.h = canvas.height;
     shot.style.display = 'block'; video.style.display = 'none';
     frozen = true;
@@ -554,6 +566,13 @@
     if (canvas.width && canvas.height) {
       viewEl.style.aspectRatio = canvas.width + ' / ' + canvas.height;
     }
+  }
+
+  shutterBtn.addEventListener('click', () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    freezeFromCanvas(canvas);
   });
   retakeBtn.addEventListener('click', () => {
     frozen = false; retakeBtn.style.display = 'none'; viewHint.style.display = 'none';
@@ -563,6 +582,29 @@
     viewEl.style.aspectRatio = ''; // 라이브 카메라 화면은 기본 3/4 비율(CSS)로 복귀
   });
   switchCamBtn.addEventListener('click', () => { facingMode = facingMode === 'environment' ? 'user' : 'environment'; startCamera(); });
+
+  // ---------- 기본 카메라 앱(또는 갤러리)에서 고화질 사진 불러오기 ----------
+  // 브라우저 실시간 카메라 스트림(getUserMedia)은 해상도에 한계가 있는데, 휴대폰
+  // 기본 카메라 앱은 훨씬 높은 화질로 찍히므로, 그 사진을 그대로 불러와 동일한
+  // 크롭/OCR 파이프라인에 넣을 수 있게 한다.
+  const importPhotoBtn = document.getElementById('of-import-photo');
+  const importPhotoInput = document.getElementById('of-import-photo-input');
+  importPhotoBtn.addEventListener('click', () => { importPhotoInput.click(); });
+  importPhotoInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      freezeFromCanvas(canvas);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => { showError('사진을 불러오지 못했습니다.'); };
+    img.src = URL.createObjectURL(f);
+  });
 
   // ---------- crop selection (pointer events: works for touch + mouse) ----------
   const viewEl = document.getElementById('of-view');
@@ -641,7 +683,9 @@
     // 태그가 사진에서 작게(짧은 변 기준 수십 px) 찍히는 경우가 많아, 목표 크기를 키우고
     // 업스케일 배율 상한도 올려서 글자 획이 뭉개지지 않게 한다.
     const target = targetLongSide || 900;
-    const upScale = Math.max(1, Math.min(8, target / longSide));
+    // 작은 크롭은 최대 8배까지 확대해서 획을 살리고, 카메라 해상도가 높아진 만큼
+    // 이미 충분히 큰 크롭은 과도하게 크지 않도록(처리 속도 고려) 적당히 축소한다.
+    const upScale = Math.max(0.35, Math.min(8, target / longSide));
     const out = document.createElement('canvas');
     out.width = Math.max(1, Math.round(srcCanvas.width * upScale));
     out.height = Math.max(1, Math.round(srcCanvas.height * upScale));
