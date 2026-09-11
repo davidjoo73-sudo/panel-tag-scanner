@@ -523,8 +523,17 @@
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
     try {
+      // 휴대폰 기본 카메라 앱 수준의 해상도를 요청한다(예전엔 1280x1280으로 낮게 고정돼 있어서
+      // 작은 태그 글자를 크롭하면 원본부터 흐릿했다). ideal은 상한 힌트일 뿐이라, 기기가
+      // 이보다 낮은 해상도만 지원해도 에러 없이 지원 가능한 최대치로 알아서 맞춰진다.
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false
+        video: {
+          facingMode: { ideal: facingMode },
+          width: { ideal: 4032 },
+          height: { ideal: 3024 },
+          advanced: [{ focusMode: 'continuous' }]
+        },
+        audio: false
       });
       video.srcObject = stream;
       video.style.display = 'block'; shot.style.display = 'none';
@@ -641,7 +650,9 @@
     // 태그가 사진에서 작게(짧은 변 기준 수십 px) 찍히는 경우가 많아, 목표 크기를 키우고
     // 업스케일 배율 상한도 올려서 글자 획이 뭉개지지 않게 한다.
     const target = targetLongSide || 900;
-    const upScale = Math.max(1, Math.min(8, target / longSide));
+    // 작은 크롭은 최대 8배까지 확대해서 획을 살리고, 카메라 해상도가 높아진 만큼
+    // 이미 충분히 큰 크롭은 과도하게 크지 않도록(처리 속도 고려) 적당히 축소한다.
+    const upScale = Math.max(0.35, Math.min(8, target / longSide));
     const out = document.createElement('canvas');
     out.width = Math.max(1, Math.round(srcCanvas.width * upScale));
     out.height = Math.max(1, Math.round(srcCanvas.height * upScale));
