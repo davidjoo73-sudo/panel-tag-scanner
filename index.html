@@ -141,19 +141,20 @@
   <div class="of-stage-banner" id="of-stage-banner"></div>
 
   <div class="of-view" id="of-view">
-    <video id="of-video" autoplay playsinline muted></video>
     <img id="of-shot" style="display:none;" />
     <div class="of-crop-rect" id="of-crop-rect"></div>
     <div class="of-view-hint" id="of-view-hint" style="display:none;">정지 화면 위를 손가락으로 드래그해서 글자 부분만 선택하세요</div>
+    <div id="of-view-placeholder" style="position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:14px; text-align:center; padding:0 24px;">아래 촬영 버튼을 누르면 휴대폰 기본 카메라 앱이 열립니다</div>
   </div>
 
   <div class="of-controls">
     <button class="of-btn ghost" id="of-retake" style="display:none;">다시 촬영</button>
-    <button class="of-shutter" id="of-shutter" disabled></button>
+    <button class="of-shutter" id="of-shutter"></button>
     <button class="of-btn ghost" id="of-switch-cam">전/후면</button>
   </div>
   <div class="of-controls" style="padding-top:0;">
-    <button class="of-btn" id="of-import-photo" style="width:100%;">📷 기본 카메라 앱으로 고화질 사진 불러오기</button>
+    <button class="of-btn" id="of-import-photo" style="width:100%;">🖼️ 갤러리에서 사진 선택(이미 찍은 사진)</button>
+    <input type="file" id="of-shutter-input" accept="image/*" capture="environment" style="display:none;" />
     <input type="file" id="of-import-photo-input" accept="image/*" style="display:none;" />
   </div>
   <div class="of-controls" style="padding-top:0;">
@@ -533,11 +534,12 @@
   }
 
   // ---------- camera ----------
-  const video = document.getElementById('of-video');
   const shot = document.getElementById('of-shot');
+  const viewPlaceholder = document.getElementById('of-view-placeholder');
   const cropRect = document.getElementById('of-crop-rect');
   const viewHint = document.getElementById('of-view-hint');
   const shutterBtn = document.getElementById('of-shutter');
+  const shutterInput = document.getElementById('of-shutter-input');
   const retakeBtn = document.getElementById('of-retake');
   const switchCamBtn = document.getElementById('of-switch-cam');
   const ocrBox = document.getElementById('of-ocr-box');
@@ -550,38 +552,31 @@
   const logWrap = document.getElementById('of-log');
   const logItems = document.getElementById('of-log-items');
 
-  let stream = null, facingMode = 'environment', frozen = false;
+  let facingMode = 'environment', frozen = false;
   let dragStart = null, dragRect = null, cropRotation = 0; // 0/90/180/270 — 기울어진/세로 태그 대응
 
-  async function startCamera() {
-    if (stream) stream.getTracks().forEach(t => t.stop());
-    try {
-      // 휴대폰 기본 카메라 앱 수준의 해상도를 요청한다(예전엔 1280x1280으로 낮게 고정돼 있어서
-      // 작은 태그 글자를 크롭하면 원본부터 흐릿했다). ideal은 상한 힌트일 뿐이라, 기기가
-      // 이보다 낮은 해상도만 지원해도 에러 없이 지원 가능한 최대치로 알아서 맞춰진다.
-      stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: facingMode },
-          width: { ideal: 4032 },
-          height: { ideal: 3024 },
-          advanced: [{ focusMode: 'continuous' }]
-        },
-        audio: false
-      });
-      video.srcObject = stream;
-      video.style.display = 'block'; shot.style.display = 'none';
-      shutterBtn.disabled = false;
-    } catch (err) {
-      showError('카메라를 사용할 수 없습니다: ' + err.message);
-    }
+  // 브라우저 실시간 카메라 스트림(getUserMedia)은 기종에 따라 해상도가 낮게 제한되는 경우가
+  // 많아, 촬영 버튼을 누르면 항상 휴대폰 기본 카메라 앱이 곧바로 열리게 한다. 기본 카메라 앱은
+  // 자동초점·HDR 등을 포함해 그 기기가 낼 수 있는 최고 화질로 찍어주므로 별도 제약이 없다.
+  function loadImageFileToCanvas(file, onDone) {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      onDone(canvas);
+      URL.revokeObjectURL(img.src);
+    };
+    img.onerror = () => { showError('사진을 불러오지 못했습니다.'); };
+    img.src = URL.createObjectURL(file);
   }
 
-  // 정지 화면(shot)을 특정 캔버스 내용으로 고정한다. 라이브 카메라에서 촬영했든,
-  // 기본 카메라 앱에서 불러온 고화질 사진이든 이후 처리(크롭/OCR)는 완전히 동일하게 동작한다.
+  // 정지 화면(shot)을 특정 캔버스 내용으로 고정한다.
   function freezeFromCanvas(canvas) {
     shot.src = canvas.toDataURL('image/jpeg', 0.92);
     shot.dataset.w = canvas.width; shot.dataset.h = canvas.height;
-    shot.style.display = 'block'; video.style.display = 'none';
+    shot.style.display = 'block';
+    viewPlaceholder.style.display = 'none';
     frozen = true;
     retakeBtn.style.display = 'inline-block';
     viewHint.style.display = 'block';
@@ -598,24 +593,28 @@
   }
 
   shutterBtn.addEventListener('click', () => {
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    freezeFromCanvas(canvas);
+    shutterInput.setAttribute('capture', facingMode === 'environment' ? 'environment' : 'user');
+    shutterInput.click();
+  });
+  shutterInput.addEventListener('change', (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    loadImageFileToCanvas(f, freezeFromCanvas);
   });
   retakeBtn.addEventListener('click', () => {
     frozen = false; retakeBtn.style.display = 'none'; viewHint.style.display = 'none';
     cropRect.style.display = 'none'; ocrBox.style.display = 'none';
-    shot.style.display = 'none'; video.style.display = 'block';
+    shot.style.display = 'none'; viewPlaceholder.style.display = 'flex';
     cropRotation = 0;
-    viewEl.style.aspectRatio = ''; // 라이브 카메라 화면은 기본 3/4 비율(CSS)로 복귀
+    viewEl.style.aspectRatio = ''; // 기본 3/4 비율(CSS)로 복귀
   });
-  switchCamBtn.addEventListener('click', () => { facingMode = facingMode === 'environment' ? 'user' : 'environment'; startCamera(); });
+  switchCamBtn.addEventListener('click', () => {
+    facingMode = facingMode === 'environment' ? 'user' : 'environment';
+    switchCamBtn.textContent = facingMode === 'environment' ? '전/후면(후면)' : '전/후면(전면)';
+  });
 
-  // ---------- 기본 카메라 앱(또는 갤러리)에서 고화질 사진 불러오기 ----------
-  // 브라우저 실시간 카메라 스트림(getUserMedia)은 해상도에 한계가 있는데, 휴대폰
-  // 기본 카메라 앱은 훨씬 높은 화질로 찍히므로, 그 사진을 그대로 불러와 동일한
-  // 크롭/OCR 파이프라인에 넣을 수 있게 한다.
+  // ---------- 갤러리에서 이미 찍은 사진 선택 ----------
   const importPhotoBtn = document.getElementById('of-import-photo');
   const importPhotoInput = document.getElementById('of-import-photo-input');
   importPhotoBtn.addEventListener('click', () => { importPhotoInput.click(); });
@@ -623,16 +622,7 @@
     const f = e.target.files[0];
     e.target.value = '';
     if (!f) return;
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-      canvas.getContext('2d').drawImage(img, 0, 0);
-      freezeFromCanvas(canvas);
-      URL.revokeObjectURL(img.src);
-    };
-    img.onerror = () => { showError('사진을 불러오지 못했습니다.'); };
-    img.src = URL.createObjectURL(f);
+    loadImageFileToCanvas(f, freezeFromCanvas);
   });
 
   // ---------- crop selection (pointer events: works for touch + mouse) ----------
@@ -669,8 +659,8 @@
   }
 
   function getCroppedCanvas() {
-    const naturalW = parseInt(shot.dataset.w || video.videoWidth, 10);
-    const naturalH = parseInt(shot.dataset.h || video.videoHeight, 10);
+    const naturalW = parseInt(shot.dataset.w, 10) || shot.naturalWidth || 0;
+    const naturalH = parseInt(shot.dataset.h, 10) || shot.naturalHeight || 0;
     let cw, ch, drawArgs; // drawArgs: [sx, sy, sw, sh] on source image, or null for whole image
     if (!dragRect || dragRect.w < 8 || dragRect.h < 8) {
       cw = naturalW; ch = naturalH; drawArgs = null;
@@ -1175,10 +1165,11 @@
     multiStatusEl.textContent = '전체 스캔 중… (QR + 태그 자동 인식, 몇 초 걸릴 수 있습니다)';
     try {
       const canvas = document.createElement('canvas');
-      let sw, sh, sourceEl;
-      if (frozen) { sourceEl = shot; sw = parseInt(shot.dataset.w || 0, 10); sh = parseInt(shot.dataset.h || 0, 10); }
-      else { sourceEl = video; sw = video.videoWidth; sh = video.videoHeight; }
-      if (!sw || !sh) { showError('카메라 화면을 아직 읽을 수 없습니다.'); multiStatusEl.style.display = 'none'; return; }
+      if (!frozen) { showError('먼저 촬영 버튼으로 사진을 찍거나 불러와주세요.'); multiStatusEl.style.display = 'none'; return; }
+      const sourceEl = shot;
+      const sw = parseInt(shot.dataset.w, 10) || shot.naturalWidth || 0;
+      const sh = parseInt(shot.dataset.h, 10) || shot.naturalHeight || 0;
+      if (!sw || !sh) { showError('사진을 아직 읽을 수 없습니다.'); multiStatusEl.style.display = 'none'; return; }
       canvas.width = sw; canvas.height = sh;
       const ctx = canvas.getContext('2d');
       ctx.drawImage(sourceEl, 0, 0, sw, sh);
@@ -1554,7 +1545,6 @@
   loadMemory();
   loadSessionLogFromStorage();
   loadListFromStorage();
-  startCamera();
   initEngine();
 })();
 </script>
