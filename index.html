@@ -525,6 +525,17 @@
   });
   viewEl.addEventListener('pointerup', () => { dragStart = null; });
 
+  // object-fit:contain 이면 화면 비율과 사진 비율이 다를 때 위아래(또는 좌우)에
+  // 여백(레터박스)이 생긴다. 이 여백을 빼지 않고 좌표를 계산하면 엉뚱한 부분이 잘린다.
+  function containedImageRect(naturalW, naturalH, boxW, boxH) {
+    const imgRatio = naturalW / naturalH;
+    const boxRatio = boxW / boxH;
+    let dispW, dispH;
+    if (imgRatio > boxRatio) { dispW = boxW; dispH = boxW / imgRatio; }
+    else { dispH = boxH; dispW = boxH * imgRatio; }
+    return { offsetX: (boxW - dispW) / 2, offsetY: (boxH - dispH) / 2, dispW, dispH };
+  }
+
   function getCroppedCanvas() {
     const naturalW = parseInt(shot.dataset.w || video.videoWidth, 10);
     const naturalH = parseInt(shot.dataset.h || video.videoHeight, 10);
@@ -532,9 +543,16 @@
     if (!dragRect || dragRect.w < 8 || dragRect.h < 8) {
       cw = naturalW; ch = naturalH; drawArgs = null;
     } else {
-      const sx = naturalW / dragRect.viewW, sy = naturalH / dragRect.viewH;
-      cw = dragRect.w * sx; ch = dragRect.h * sy;
-      drawArgs = [dragRect.left * sx, dragRect.top * sy, cw, ch];
+      const rect = containedImageRect(naturalW, naturalH, dragRect.viewW, dragRect.viewH);
+      const scale = naturalW / rect.dispW; // dispW/dispH 기준 스케일(둘 다 같은 값)
+      const cx = (dragRect.left - rect.offsetX) * scale;
+      const cy = (dragRect.top - rect.offsetY) * scale;
+      cw = dragRect.w * scale; ch = dragRect.h * scale;
+      // 실제 이미지 범위를 벗어나지 않도록 보정
+      const x0 = Math.max(0, cx), y0 = Math.max(0, cy);
+      const x1 = Math.min(naturalW, cx + cw), y1 = Math.min(naturalH, cy + ch);
+      cw = Math.max(1, x1 - x0); ch = Math.max(1, y1 - y0);
+      drawArgs = [x0, y0, cw, ch];
     }
     const cropCanvas = document.createElement('canvas');
     cropCanvas.width = cw; cropCanvas.height = ch;
@@ -933,16 +951,42 @@
       ctx.drawImage(sourceEl, 0, 0, sw, sh);
 
       let candidates = [];
+      let qrStatus = ''; // 진단용 — 항상 사용자에게 QR 시도 결과를 명확히 알려준다.
 
       // 1) QR 코드 우선 시도 — OCR 엔진/리스트 준비 여부와 무관하게 항상 바로 시도한다.
       if (typeof jsQR === 'undefined') {
+        qrStatus = 'QR 라이브러리 로드 실패(네트워크 확인 필요)';
         showError('QR 인식 라이브러리를 아직 불러오지 못했습니다 (네트워크 확인 필요). 잠시 후 다시 시도해주세요.');
       } else {
         try {
           const imgData = ctx.getImageData(0, 0, sw, sh);
           const code = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
-          if (code && code.data) candidates.push({ raw: code.data, row: null, bbox: null, kind: 'QR' });
-        } catch (e) { /* QR 실패는 무시하고 계속 진행 */ }
+          if (code && code.data) {
+            candidates.push({ raw: code.data, row: null, bbox: null, kind: 'QR' });
+            qrStatus = 'QR 찾음(전체화면)';
+          } else {
+            qrStatus = 'QR 못 찾음(전체화면)';
+          }
+        } catch (e) {
+          qrStatus = 'QR 처리 오류: ' + e.message;
+        }
+
+        // 전체화면에서 못 찾았고, 드래그로 선택한 영역이 있으면 그 부분을 확대해서 다시 시도
+        // (QR코드가 전체 사진 안에서 너무 작으면 해상도가 부족해 인식이 안 될 수 있음)
+        if (!candidates.length && dragRect && dragRect.w > 8 && dragRect.h > 8) {
+          try {
+            const cropForQR = getCroppedCanvas();
+            const qctx = cropForQR.getContext('2d');
+            const qData = qctx.getImageData(0, 0, cropForQR.width, cropForQR.height);
+            const code2 = jsQR(qData.data, cropForQR.width, cropForQR.height, { inversionAttempts: 'attemptBoth' });
+            if (code2 && code2.data) {
+              candidates.push({ raw: code2.data, row: null, bbox: null, kind: 'QR' });
+              qrStatus = 'QR 찾음(선택영역 확대)';
+            } else {
+              qrStatus += ' / 선택영역에서도 못 찾음';
+            }
+          } catch (e) { /* 선택영역 QR 재시도 실패는 무시 */ }
+        }
       }
 
       // 2) OCR 기반 인식(선택영역 + 판넬 전체)은 엔진이 준비된 경우에만 추가로 시도한다.
@@ -988,14 +1032,14 @@
       inMultiReview = candidates.length > 0;
       if (!candidates.length) {
         if (!ocrAvailable) {
-          multiStatusEl.textContent = 'QR을 찾지 못했습니다. OCR 엔진이 아직 준비 중이라 태그 인식은 건너뛰었습니다 — 잠시 후 다시 눌러보세요.';
+          multiStatusEl.textContent = '[' + qrStatus + '] OCR 엔진이 아직 준비 중이라 태그 인식은 건너뛰었습니다 — 잠시 후 다시 눌러보세요.';
         } else if (!refList.length) {
-          multiStatusEl.textContent = 'QR을 찾지 못했고, BM/TB LIST가 없어 태그 대조도 되지 않았습니다. 리스트를 불러온 뒤 다시 시도해주세요.';
+          multiStatusEl.textContent = '[' + qrStatus + '] BM/TB LIST가 없어 태그 대조도 되지 않았습니다. 리스트를 불러온 뒤 다시 시도해주세요.';
         } else {
-          multiStatusEl.textContent = '아무 것도 찾지 못했습니다. 더 가깝고 선명하게 다시 시도해보세요.';
+          multiStatusEl.textContent = '[' + qrStatus + '] 태그 후보도 찾지 못했습니다. 더 가깝고 선명하게 다시 시도해보세요.';
         }
       } else {
-        multiStatusEl.textContent = candidates.length + '개 발견(QR/선택영역/태그 포함) — 아래에서 하나씩 확인하세요.';
+        multiStatusEl.textContent = '[' + qrStatus + '] ' + candidates.length + '개 발견(QR/선택영역/태그 포함) — 아래에서 하나씩 확인하세요.';
         showNextMultiCandidate();
       }
     } catch (e) {
