@@ -180,6 +180,9 @@
     <p class="of-section-title">이번 세션 기록 (최신순)</p>
     <div class="of-row" style="margin-bottom:10px;">
       <button class="of-btn primary" id="of-export">📄 엑셀로 저장</button>
+      <button class="of-btn" id="of-import-btn">📥 이전 파일 불러오기</button>
+      <input type="file" id="of-import-input" accept=".csv,.xlsx,.xls" style="display:none;" />
+      <button class="of-btn ghost" id="of-clear-log" style="color:var(--err); border-color:var(--err-dim);">🗑 기록 삭제</button>
     </div>
     <div id="of-log-items"></div>
   </div>
@@ -750,6 +753,7 @@
       SPEC: currentRow ? (rowField(currentRow, 'spec') || '') : ''
     };
     sessionLog.unshift(rec);
+    saveSessionLogToStorage();
     renderLog();
   }
   document.getElementById('of-mark-ok').addEventListener('click', () => { saveLogEntry('확인', ''); manualRow.style.display = 'none'; });
@@ -760,6 +764,19 @@
     reasonInput.value = '';
   });
 
+  const LOG_FIELDS = ['시간','PANEL','TAG','확인/일치','불일치 사유','MAKER','MODEL_NO','SERIAL_NO','SPEC'];
+
+  function saveSessionLogToStorage() {
+    try { localStorage.setItem('session_log', JSON.stringify(sessionLog)); } catch (e) {}
+  }
+  function loadSessionLogFromStorage() {
+    try {
+      const raw = localStorage.getItem('session_log');
+      sessionLog = raw ? JSON.parse(raw) : [];
+    } catch (e) { sessionLog = []; }
+    renderLog();
+  }
+
   function renderLog() {
     if (!sessionLog.length) { logWrap.style.display = 'none'; return; }
     logWrap.style.display = 'block';
@@ -768,27 +785,81 @@
       return '<div class="of-log-item"><span><span class="of-log-tag">' + escapeHtml(r.TAG) + '</span> ' + okLabel + '</span>' +
         '<span style="color:var(--muted);">' + escapeHtml(r['불일치 사유'] || r.PANEL) + '</span></div>';
     }).join('');
+    if (sessionLog.length > 40) {
+      logItems.innerHTML += '<div style="text-align:center; color:var(--muted); font-size:12px; padding:6px;">... 외 ' + (sessionLog.length - 40) + '건 더 있음 (엑셀로 저장하면 전체 포함)</div>';
+    }
   }
 
   document.getElementById('of-export').addEventListener('click', () => {
     if (!sessionLog.length) { alert('내보낼 기록이 없습니다.'); return; }
-    const fields = ['시간','PANEL','TAG','확인/일치','불일치 사유','MAKER','MODEL_NO','SERIAL_NO','SPEC'];
     if (window.XLSX) {
-      const ws = XLSX.utils.json_to_sheet(sessionLog, { header: fields });
+      const ws = XLSX.utils.json_to_sheet(sessionLog, { header: LOG_FIELDS });
       const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, 'BOM_Check');
       XLSX.writeFile(wb, 'bom_check_offline_' + Date.now() + '.xlsx');
     } else {
-      const csv = [fields.join(',')].concat(sessionLog.map(r => fields.map(f => '"' + String(r[f]||'').replace(/"/g,'""') + '"').join(','))).join('\n');
+      const csv = [LOG_FIELDS.join(',')].concat(sessionLog.map(r => LOG_FIELDS.map(f => '"' + String(r[f]||'').replace(/"/g,'""') + '"').join(','))).join('\n');
       const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob); a.download = 'bom_check_offline_' + Date.now() + '.csv'; a.click();
     }
   });
 
+  document.getElementById('of-clear-log').addEventListener('click', () => {
+    if (!sessionLog.length) { alert('삭제할 기록이 없습니다.'); return; }
+    const ok = confirm('PC로 옮기셨나요?\n\n"기록 삭제"를 누르면 이 휴대폰에 저장된 ' + sessionLog.length + '건이 모두 지워지고 복구할 수 없습니다.\n계속할까요?');
+    if (!ok) return;
+    sessionLog = [];
+    saveSessionLogToStorage();
+    renderLog();
+    alert('삭제되었습니다.');
+  });
+
+  document.getElementById('of-import-btn').addEventListener('click', () => {
+    document.getElementById('of-import-input').click();
+  });
+  document.getElementById('of-import-input').addEventListener('change', (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const isExcel = /\.(xlsx|xls)$/i.test(f.name);
+    const reader = new FileReader();
+    reader.onload = () => {
+      let rows = [];
+      try {
+        if (isExcel) {
+          if (typeof XLSX === 'undefined') { alert('엑셀 처리 라이브러리를 불러오지 못했습니다.'); return; }
+          const wb = XLSX.read(reader.result, { type: 'array' });
+          rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '', raw: false });
+        } else {
+          rows = parseCSV(reader.result).rows;
+        }
+        if (!rows.length) { alert('파일에서 기록을 찾지 못했습니다.'); return; }
+        // 기존 형식(우리가 내보낸 파일)과 컬럼명이 다르면 그대로 존재하는 값만 사용
+        const imported = rows.map(r => {
+          const o = {};
+          LOG_FIELDS.forEach(f2 => { o[f2] = r[f2] != null ? String(r[f2]) : ''; });
+          return o;
+        });
+        const addOrReplace = confirm(
+          imported.length + '건을 불러왔습니다.\n\n' +
+          '확인 = 기존 기록 뒤에 추가\n취소 = 기존 기록을 이걸로 교체'
+        );
+        sessionLog = addOrReplace ? imported.concat(sessionLog) : imported;
+        saveSessionLogToStorage();
+        renderLog();
+        alert('불러오기 완료: 현재 총 ' + sessionLog.length + '건');
+      } catch (err) {
+        alert('파일을 읽는 중 오류: ' + err.message);
+      } finally {
+        e.target.value = '';
+      }
+    };
+    if (isExcel) reader.readAsArrayBuffer(f); else reader.readAsText(f, 'utf-8');
+  });
+
   // ---------- init ----------
   updateStageUI();
   loadMemory();
+  loadSessionLogFromStorage();
   startCamera();
   initEngine();
 })();
