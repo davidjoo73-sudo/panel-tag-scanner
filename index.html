@@ -752,6 +752,25 @@
     return stretched;
   }
 
+  // 고화질 사진일수록 금속 각인/양각 표면의 미세한 반사·질감(노이즈)까지 선명하게 잡혀서
+  // 오히려 Tesseract가 글자 획을 노이즈와 헷갈리는 경우가 있다. 일부러 한 번 축소했다가
+  // 다시 확대해서 미세 질감은 뭉개고 글자의 큰 형태만 남긴다 — 저해상도 촬영에서 자연스럽게
+  // 생기던 "적당한 블러" 효과를 재현하는 것과 같다.
+  function preprocessForOCRSmoothed(srcCanvas, targetLongSide) {
+    const target = targetLongSide || 900;
+    const smallTarget = Math.max(60, Math.round(target * 0.4));
+    const longSide = Math.max(srcCanvas.width, srcCanvas.height, 1);
+    const downScale = smallTarget / longSide;
+    const small = document.createElement('canvas');
+    small.width = Math.max(1, Math.round(srcCanvas.width * downScale));
+    small.height = Math.max(1, Math.round(srcCanvas.height * downScale));
+    const sctx = small.getContext('2d');
+    sctx.imageSmoothingEnabled = true;
+    sctx.imageSmoothingQuality = 'high';
+    sctx.drawImage(srcCanvas, 0, 0, small.width, small.height);
+    return preprocessForOCR(small, target);
+  }
+
   // ---------- OCR 재시도용: 여러 인식모드(PSM)와 전처리 방식을 순서대로 시도해서
   // 첫 번째로 글자를 찾아낸 결과를 사용한다. 태그 사진은 크기/기울기/조명이 제각각이라
   // 한 가지 설정으로는 자주 빈 결과가 나오는데, 이렇게 여러 시도를 붙이면 성공률이 크게 오른다.
@@ -761,6 +780,8 @@
       { label: '표준(여러줄)', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '6' },
       { label: '한줄모드', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '7' },
       { label: '확대(더 크게)', canvas: preprocessForOCR(rawCropCanvas, 1400), psm: '7' },
+      { label: '블러(질감 제거)+한줄', canvas: preprocessForOCRSmoothed(rawCropCanvas, 900), psm: '7' },
+      { label: '블러+이진화', canvas: preprocessForOCRBinarized(preprocessForOCRSmoothed(rawCropCanvas, 900), 900), psm: '7' },
       { label: '이진화+한줄', canvas: preprocessForOCRBinarized(rawCropCanvas, 1200), psm: '7' },
       { label: '이진화+단어', canvas: preprocessForOCRBinarized(rawCropCanvas, 1400), psm: '8' },
       { label: '이진화+원시라인', canvas: preprocessForOCRBinarized(rawCropCanvas, 1200), psm: '13' },
