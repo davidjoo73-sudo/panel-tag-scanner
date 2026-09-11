@@ -478,12 +478,41 @@
       reader.readAsText(f, 'utf-8');
     }
   });
+  // 판넬 하나에 등록된 TAG 개수는 보통 몇십 개 이내로 적기 때문에, OCR이 다소 틀려도
+  // "그 판넬에 등록된 TAG들 중 가장 가까운 것"을 찾아내면 실질적으로 맞힐 수 있는 경우가
+  // 많다. 1글자 차이까지만 허용하던 기존 방식보다 훨씬 넓게(글자 수의 약 45%까지) 허용하되,
+  // 1등과 2등 후보가 너무 비슷해서 애매하면(오매칭 위험) 아예 매칭하지 않는다.
+  // 최종적으로는 DEVICE TAG 확인 단계에서 "리스트 값"과 "인식된 값"을 항상 나란히 보여주므로,
+  // 설령 이 추정이 틀려도 사용자가 그 자리에서 바로 확인하고 "불일치"로 넘어갈 수 있다.
+  function bestFuzzyMatch(token, pool, keyCol) {
+    const tn = normKey(token);
+    if (!tn || !keyCol) return null;
+    let best = null, bestDist = Infinity, secondDist = Infinity;
+    for (const row of pool) {
+      const kn = normKey(row[keyCol]);
+      if (!kn) continue;
+      if (kn === tn) return { row, dist: 0 };
+      const d = levenshtein(kn, tn);
+      if (d < bestDist) { secondDist = bestDist; bestDist = d; best = row; }
+      else if (d < secondDist) { secondDist = d; }
+    }
+    if (!best) return null;
+    const maxLen = Math.max(tn.length, normKey(best[keyCol]).length, 1);
+    const threshold = Math.max(2, Math.ceil(maxLen * 0.45));
+    if (bestDist > threshold) return null;
+    if (secondDist - bestDist < 1 && secondDist <= threshold) return null; // 애매하면 매칭 보류
+    return { row: best, dist: bestDist };
+  }
+
   function matchAgainstList(tag) {
     if (!refList.length || !refKeyCol) return null;
     let pool = refList;
     if (refPanelCol && selectedPanel) pool = refList.filter(r => normKey(r[refPanelCol]) === normKey(selectedPanel));
     const t = normKey(tag);
-    return pool.find(r => normKey(r[refKeyCol]) === t) || null;
+    const exact = pool.find(r => normKey(r[refKeyCol]) === t);
+    if (exact) return exact;
+    const fuzzy = bestFuzzyMatch(t, pool, refKeyCol);
+    return fuzzy ? fuzzy.row : null;
   }
 
   // ---------- stage UI ----------
@@ -1017,15 +1046,8 @@
     if (tn.length < 3 || !refKeyCol) return null;
     let pool = refList;
     if (refPanelCol && selectedPanel) pool = refList.filter(r => normKey(r[refPanelCol]) === normKey(selectedPanel));
-    for (const row of pool) {
-      if (normKey(row[refKeyCol]) === tn) return row;
-    }
-    for (const row of pool) {
-      const kn = normKey(row[refKeyCol]);
-      if (!kn) continue;
-      if (Math.abs(kn.length - tn.length) <= 1 && levenshtein(kn, tn) <= 1) return row;
-    }
-    return null;
+    const match = bestFuzzyMatch(tn, pool, refKeyCol);
+    return match ? match.row : null;
   }
 
   function showNextMultiCandidate() {
