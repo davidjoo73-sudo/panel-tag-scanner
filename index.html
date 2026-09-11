@@ -670,6 +670,44 @@
     return out;
   }
 
+  // 대비 스트레칭만으로는 부족한, 두껍고 각진 산업용 각인체(embossed/dot-matrix 스타일)
+  // 글자를 위해 순수 흑백(이진화)으로 한 번 더 밀어붙이는 전처리. Otsu 방법으로 최적의
+  // 경계값을 자동으로 찾아서 배경(노란 라벨 등)과 글자를 확실히 분리한다.
+  function otsuThreshold(grayValues) {
+    const hist = new Array(256).fill(0);
+    for (let i = 0; i < grayValues.length; i++) hist[Math.round(grayValues[i])]++;
+    const total = grayValues.length;
+    let sum = 0;
+    for (let t = 0; t < 256; t++) sum += t * hist[t];
+    let sumB = 0, wB = 0, maxVar = 0, threshold = 127;
+    for (let t = 0; t < 256; t++) {
+      wB += hist[t];
+      if (wB === 0) continue;
+      const wF = total - wB;
+      if (wF === 0) break;
+      sumB += t * hist[t];
+      const mB = sumB / wB, mF = (sum - sumB) / wF;
+      const varBetween = wB * wF * (mB - mF) * (mB - mF);
+      if (varBetween > maxVar) { maxVar = varBetween; threshold = t; }
+    }
+    return threshold;
+  }
+  function preprocessForOCRBinarized(srcCanvas, targetLongSide) {
+    const stretched = preprocessForOCR(srcCanvas, targetLongSide);
+    const ctx = stretched.getContext('2d');
+    const imgData = ctx.getImageData(0, 0, stretched.width, stretched.height);
+    const d = imgData.data;
+    const gray = new Float32Array(d.length / 4);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) gray[j] = d[i];
+    const th = otsuThreshold(gray);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      const v = gray[j] > th ? 255 : 0;
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return stretched;
+  }
+
   // ---------- OCR 재시도용: 여러 인식모드(PSM)와 전처리 방식을 순서대로 시도해서
   // 첫 번째로 글자를 찾아낸 결과를 사용한다. 태그 사진은 크기/기울기/조명이 제각각이라
   // 한 가지 설정으로는 자주 빈 결과가 나오는데, 이렇게 여러 시도를 붙이면 성공률이 크게 오른다.
@@ -679,6 +717,9 @@
       { label: '표준(여러줄)', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '6' },
       { label: '한줄모드', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '7' },
       { label: '확대(더 크게)', canvas: preprocessForOCR(rawCropCanvas, 1400), psm: '7' },
+      { label: '이진화+한줄', canvas: preprocessForOCRBinarized(rawCropCanvas, 1200), psm: '7' },
+      { label: '이진화+단어', canvas: preprocessForOCRBinarized(rawCropCanvas, 1400), psm: '8' },
+      { label: '이진화+원시라인', canvas: preprocessForOCRBinarized(rawCropCanvas, 1200), psm: '13' },
       { label: '원본(전처리 없음)', canvas: rawCropCanvas, psm: '6' }
     ];
     for (const attempt of attempts) {
