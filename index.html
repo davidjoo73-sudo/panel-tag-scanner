@@ -248,7 +248,9 @@
     ['maker', ['maker', 'manufacturer', '제조사', '메이커']],
     ['model_no', ['model', '모델']],
     ['serial_no', ['serial', '시리얼']],
-    ['spec', ['spec', '사양', '규격', 'rating']]
+    ['spec', ['spec', '사양', '규격', 'rating']],
+    ['description', ['description', '설명', '내용', 'desc']],
+    ['remark', ['remark', '비고', 'note']]
   ];
   function rowField(row, key) {
     if (!row) return null;
@@ -258,6 +260,25 @@
       return aliases.some(a => cn.includes(a.replace(/[\s_]/g, '')));
     });
     return col ? row[col] : null;
+  }
+
+  // TAG(DEVICE TAG) -> DESCRIPTION -> MODEL -> ORDER SPEC.2 -> MAKER -> (비고, 내용 있을 때만)
+  // 순서로 한 항목씩 육안 대조하기 위한 체크리스트를 만든다.
+  // DEVICE TAG 단계는 "리스트에 등록된 값"과 "실제로 인식/입력된 값"을 같이 보여줘서,
+  // 퍼지매칭(오탈자 1글자 허용)으로 살짝 다른 값이 매칭된 경우도 바로 눈에 띄게 한다.
+  function buildFieldChecklist(row, tagListValue, tagRawValue) {
+    const list = [{ key: 'tag', label: 'DEVICE TAG', value: tagListValue, rawValue: tagRawValue }];
+    const desc = rowField(row, 'description');
+    if (desc) list.push({ key: 'description', label: 'DESCRIPTION', value: desc });
+    const model = rowField(row, 'model_no');
+    if (model) list.push({ key: 'model_no', label: 'MODEL', value: model });
+    const spec = rowField(row, 'spec');
+    if (spec) list.push({ key: 'spec', label: 'ORDER SPEC.2', value: spec });
+    const maker = rowField(row, 'maker');
+    if (maker) list.push({ key: 'maker', label: 'MAKER', value: maker });
+    const remark = rowField(row, 'remark');
+    if (remark) list.push({ key: 'remark', label: '비고', value: remark });
+    return list;
   }
 
   // ---------- state ----------
@@ -377,13 +398,32 @@
     applyRows(rows, headers, meta);
   }
 
-  function sheetToRowsSmart(sheet) {
+  function normHeaderStr(s) { return String(s == null ? '' : s).trim().toLowerCase().replace(/[\s_./-]/g, ''); }
+
+  function sheetToRowsSmart(sheet, forcedHeaders) {
     // 실제 회사 양식은 1행이 비어있고 2행에 헤더가 있는 경우가 있어, 첫 헤더처럼 보이는 행을 자동으로 찾는다.
     const raw = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' });
     let headerRowIdx = raw.findIndex(r => r.filter(c => String(c).trim() !== '').length >= 2);
     if (headerRowIdx === -1) headerRowIdx = 0;
-    const headers = raw[headerRowIdx].map((h, i) => (h && String(h).trim()) || ('COL' + (i + 1)));
-    const rows = raw.slice(headerRowIdx + 1).map(r => {
+    const candidateRow = raw[headerRowIdx] || [];
+
+    let headers, dataRows;
+    if (forcedHeaders) {
+      // 다른 시트에서 이미 찾은 헤더가 있는 경우: 이 시트의 첫 행이 진짜 헤더인지
+      // (앞서 찾은 헤더들과 많이 겹치는지) 확인해서, 헤더가 아니라 실제 데이터인데
+      // 우연히 맨 위에 온 행이면 헤더로 착각해 데이터를 잃어버리지 않도록 한다.
+      const normForced = forcedHeaders.map(normHeaderStr);
+      const normCandidate = candidateRow.map(normHeaderStr);
+      const overlap = normCandidate.filter(c => c && normForced.includes(c)).length;
+      const looksLikeHeader = candidateRow.length && (overlap / Math.max(1, normCandidate.filter(Boolean).length)) >= 0.4;
+      headers = forcedHeaders;
+      dataRows = looksLikeHeader ? raw.slice(headerRowIdx + 1) : raw.slice(headerRowIdx);
+    } else {
+      headers = candidateRow.map((h, i) => (h && String(h).trim()) || ('COL' + (i + 1)));
+      dataRows = raw.slice(headerRowIdx + 1);
+    }
+
+    const rows = dataRows.map(r => {
       const o = {};
       headers.forEach((h, i) => { o[h] = r[i] != null ? String(r[i]) : ''; });
       return o;
@@ -399,10 +439,20 @@
     }
     try {
       const wb = XLSX.read(buffer, { type: 'array' });
-      const firstSheetName = wb.SheetNames[0];
-      const sheet = wb.Sheets[firstSheetName];
-      const { rows: normRows, headers } = sheetToRowsSmart(sheet);
-      applyRows(normRows, headers, meta);
+      // 시트가 여러 개면(예: "BM list" + "Sheet1") 전부 같은 리스트로 합쳐서 대조한다.
+      // 첫 시트에서 헤더를 찾고, 나머지 시트는 그 헤더를 그대로 적용한다
+      // (헤더 없이 바로 데이터부터 시작하는 시트도 자동으로 처리됨).
+      let mergedRows = [], primaryHeaders = null, usedSheets = [];
+      wb.SheetNames.forEach((name) => {
+        const sheet = wb.Sheets[name];
+        const { rows, headers } = sheetToRowsSmart(sheet, primaryHeaders);
+        if (!rows.length) return;
+        if (!primaryHeaders) primaryHeaders = headers;
+        mergedRows = mergedRows.concat(rows);
+        usedSheets.push(name + '(' + rows.length + '행)');
+      });
+      const fullMeta = Object.assign({}, meta, { fileName: (meta && meta.fileName || '') + ' — 시트: ' + usedSheets.join(', ') });
+      applyRows(mergedRows, primaryHeaders || [], fullMeta);
     } catch (e) {
       listStatusEl.textContent = '엑셀 파일을 읽지 못했습니다: ' + e.message;
       listStatusEl.classList.replace('loaded', 'empty');
@@ -575,9 +625,12 @@
   // ---------- OCR 전처리: 확대 + 흑백 + 대비 강화(스트레칭) — 오프라인 OCR 정확도 개선용 ----------
   // (주의) 강제 이진화(흑/백 두 값으로만 자르는 방식)는 조명에 따라 화면이 통째로
   // 하얗게/까맣게 뭉개질 위험이 있어, 대신 "대비 스트레칭"만 적용해 정보 손실 없이 선명하게 만든다.
-  function preprocessForOCR(srcCanvas) {
+  function preprocessForOCR(srcCanvas, targetLongSide) {
     const longSide = Math.max(srcCanvas.width, srcCanvas.height, 1);
-    const upScale = Math.max(1, Math.min(4, 500 / longSide));
+    // 태그가 사진에서 작게(짧은 변 기준 수십 px) 찍히는 경우가 많아, 목표 크기를 키우고
+    // 업스케일 배율 상한도 올려서 글자 획이 뭉개지지 않게 한다.
+    const target = targetLongSide || 900;
+    const upScale = Math.max(1, Math.min(8, target / longSide));
     const out = document.createElement('canvas');
     out.width = Math.max(1, Math.round(srcCanvas.width * upScale));
     out.height = Math.max(1, Math.round(srcCanvas.height * upScale));
@@ -604,6 +657,32 @@
     }
     ctx.putImageData(imgData, 0, 0);
     return out;
+  }
+
+  // ---------- OCR 재시도용: 여러 인식모드(PSM)와 전처리 방식을 순서대로 시도해서
+  // 첫 번째로 글자를 찾아낸 결과를 사용한다. 태그 사진은 크기/기울기/조명이 제각각이라
+  // 한 가지 설정으로는 자주 빈 결과가 나오는데, 이렇게 여러 시도를 붙이면 성공률이 크게 오른다.
+  async function recognizeTextRobust(rawCropCanvas) {
+    if (!tesseractWorker) return { text: '', mode: '' };
+    const attempts = [
+      { label: '표준(여러줄)', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '6' },
+      { label: '한줄모드', canvas: preprocessForOCR(rawCropCanvas, 900), psm: '7' },
+      { label: '확대(더 크게)', canvas: preprocessForOCR(rawCropCanvas, 1400), psm: '7' },
+      { label: '원본(전처리 없음)', canvas: rawCropCanvas, psm: '6' }
+    ];
+    for (const attempt of attempts) {
+      try {
+        await tesseractWorker.setParameters({ tessedit_pageseg_mode: attempt.psm });
+        const { data } = await tesseractWorker.recognize(attempt.canvas);
+        const raw = (data.text || '').replace(/\s+/g, '').trim();
+        if (raw) {
+          await tesseractWorker.setParameters({ tessedit_pageseg_mode: '6' });
+          return { text: raw, mode: attempt.label };
+        }
+      } catch (e) { /* 이 시도가 실패해도 다음 시도로 계속 진행 */ }
+    }
+    await tesseractWorker.setParameters({ tessedit_pageseg_mode: '6' });
+    return { text: '', mode: '' };
   }
 
   // ---------- AI 보조 인식 (오프라인 OCR이 안 읽힐 때만 선택 사용) ----------
@@ -776,14 +855,8 @@
     ocrHint.textContent = '';
     verdictSlot.innerHTML = ''; manualRow.style.display = 'none';
     try {
-      let canvas;
-      try {
-        canvas = preprocessForOCR(getCroppedCanvas());
-      } catch (preErr) {
-        canvas = getCroppedCanvas(); // 전처리 실패 시 원본 크롭으로 대체(완전 실패 방지)
-      }
-      const { data: { text } } = await tesseractWorker.recognize(canvas);
-      const raw = (text || '').replace(/\s+/g, '').trim();
+      const cropped = getCroppedCanvas();
+      const { text: raw, mode } = await recognizeTextRobust(cropped);
       rawOcrText = raw;
       const suggestion = suggestFromMemory(raw);
       if (suggestion) {
@@ -791,7 +864,9 @@
         ocrHint.textContent = '교정 기억에서 자동 보정됨: "' + raw + '" → "' + suggestion + '"';
       } else {
         ocrInput.value = raw;
-        ocrHint.textContent = raw ? 'OCR 원문: "' + raw + '" (틀렸으면 위에서 수정)' : '글자를 읽지 못했습니다. 영역을 더 크게/선명하게 다시 선택해보세요.';
+        ocrHint.textContent = raw
+          ? 'OCR 원문(' + mode + '): "' + raw + '" (틀렸으면 위에서 수정)'
+          : '여러 방식으로 시도했지만 글자를 읽지 못했습니다. 태그 부분만 더 크게(화면을 꽉 채우도록) 선택하거나, 아래 "🤖 선택한 AI로 다시 인식"을 사용해보세요.';
       }
     } catch (e) {
       showError('OCR 처리 중 오류: ' + e.message);
@@ -856,15 +931,14 @@
       currentValue = cand.row[refKeyCol];
       currentRow = cand.row;
       ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 원문: "' + cand.raw + '" → 리스트 후보';
-      let lookup = '<div class="of-lookup">';
-      Object.keys(cand.row).forEach(k => { lookup += escapeHtml(k) + ': ' + escapeHtml(cand.row[k]) + '<br>'; });
-      lookup += '</div>';
-      verdictSlot.innerHTML =
-        '<div class="of-verdict found">후보 발견 — 실물 명판과 비교 후 확인/불일치를 누르거나, 후보가 아니면 건너뛰세요.</div>' + lookup;
+      startFieldCheck(cand.row, cand.row[refKeyCol], cand.raw);
+      renderFieldStep();
+      return;
     } else {
       ocrInput.value = cand.raw;
       currentValue = cand.raw;
       currentRow = null;
+      fieldCheckActive = false;
       ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 리스트와 자동 매칭되지 않았습니다. 필요하면 직접 수정하세요.';
       verdictSlot.innerHTML =
         '<div class="of-verdict unregistered">' + kindLabel + ' 내용: "' + escapeHtml(cand.raw) + '" — 리스트에 없거나 QR/URL 내용입니다.</div>';
@@ -920,6 +994,7 @@
   }
 
   // 사람이 판넬을 눈으로 훑는 순서(위쪽 줄부터, 각 줄은 왼쪽→오른쪽)로 후보를 정렬한다.
+  // (현재는 사용 안 함 — 아래 sortByListOrder로 대체. 필요 시 재사용 가능하도록 남겨둠.)
   function sortInReadingOrder(items) {
     const withBox = items.filter(c => c.bbox);
     const withoutBox = items.filter(c => !c.bbox);
@@ -934,6 +1009,17 @@
     });
     withBox.sort((a, b) => (a._row - b._row) || (a.bbox.x0 - b.bbox.x0));
     return withBox.concat(withoutBox);
+  }
+
+  // 사진 속 위치가 아니라, 불러온 BM/TB LIST에 적힌 순서(= Device Tag 순서)대로
+  // 후보를 정렬한다. 검수자가 리스트를 훑는 순서와 화면 순서가 같아야 빠뜨리는 항목 없이
+  // 더 정확하게 확인할 수 있기 때문.
+  function sortByListOrder(items) {
+    return items.slice().sort((a, b) => {
+      const ia = a.row ? refList.indexOf(a.row) : Number.MAX_SAFE_INTEGER;
+      const ib = b.row ? refList.indexOf(b.row) : Number.MAX_SAFE_INTEGER;
+      return ia - ib;
+    });
   }
 
   document.getElementById('of-auto-scan').addEventListener('click', async () => {
@@ -994,9 +1080,7 @@
 
       if (ocrAvailable && frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
         try {
-          const cropCanvas = preprocessForOCR(getCroppedCanvas());
-          const { data: cropData } = await tesseractWorker.recognize(cropCanvas);
-          const rawCrop = (cropData.text || '').replace(/\s+/g, '').trim();
+          const { text: rawCrop } = await recognizeTextRobust(getCroppedCanvas());
           if (rawCrop) candidates.push({ raw: rawCrop, row: fuzzyFindInList(rawCrop), bbox: null, kind: 'CROP' });
         } catch (e) { /* 실패해도 전체 스캔은 계속 진행 */ }
       }
@@ -1023,7 +1107,7 @@
             if (!seen.has(key)) { seen.add(key); ocrCandidates.push({ raw: tok.text, row, bbox: tok.bbox, kind: 'TAG' }); }
           }
         });
-        ocrCandidates = sortInReadingOrder(ocrCandidates);
+        ocrCandidates = sortByListOrder(ocrCandidates);
         candidates = candidates.concat(ocrCandidates);
       }
 
@@ -1052,6 +1136,53 @@
 
   // ---------- confirm / match ----------
   let currentValue = '', currentRow = null;
+  let fieldChecklist = [], fieldIndex = 0, fieldCheckActive = false;
+
+  // TAG가 리스트에서 매칭되면, 전체를 한번에 확인/불일치 처리하지 않고
+  // DEVICE TAG → DESCRIPTION → MODEL → ORDER SPEC.2 → MAKER → (비고, 있을 때만)
+  // 순서로 한 항목씩 실물과 대조하도록 안내한다. 중간에 하나라도 다르면 그 자리에서
+  // "매칭실패; <항목명> 상이"로 즉시 기록하고, 모두 일치하면 "OK 일치완료"로 기록한다.
+  function startFieldCheck(row, tagListValue, tagRawValue) {
+    fieldChecklist = buildFieldChecklist(row, tagListValue, tagRawValue);
+    fieldIndex = 0;
+    fieldCheckActive = true;
+  }
+
+  function renderFieldStep() {
+    if (fieldIndex >= fieldChecklist.length) {
+      fieldCheckActive = false;
+      saveLogEntry('OK 일치완료', '');
+      manualRow.style.display = 'none';
+      verdictSlot.innerHTML = '<div class="of-verdict found">✅ OK 일치완료 — 모든 항목이 일치했습니다.</div>';
+      if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
+      return;
+    }
+    const f = fieldChecklist[fieldIndex];
+    const stepNo = fieldIndex + 1, total = fieldChecklist.length;
+    const next = fieldChecklist[fieldIndex + 1];
+    const nextHint = next
+      ? '확인/일치를 누르면 다음: <b>' + escapeHtml(next.label) + '</b>'
+      : '확인/일치를 누르면 마지막 항목 완료 → <b>OK 일치완료</b>로 기록됩니다';
+    let valueHtml;
+    if (f.rawValue !== undefined) {
+      // DEVICE TAG 단계는 "리스트에 등록된 값"과 "실제로 인식/입력된 값"을 항상 같이 보여준다.
+      const mismatch = f.rawValue && normKey(f.rawValue) !== normKey(f.value);
+      valueHtml =
+        '<div style="font-size:12px; color:var(--muted); margin-bottom:2px;">리스트(LIST)</div>' +
+        '<div style="font-size:17px; font-weight:700;">' + escapeHtml(f.value) + '</div>' +
+        '<div style="font-size:12px; color:var(--muted); margin:8px 0 2px;">인식된 값</div>' +
+        '<div style="font-size:17px; font-weight:700;' + (mismatch ? ' color:var(--err);' : ' color:var(--ok);') + '">' + escapeHtml(f.rawValue || f.value) + '</div>';
+    } else {
+      valueHtml = '<div class="of-lookup" style="font-size:17px; font-weight:700;">' + escapeHtml(f.value) + '</div>';
+    }
+    verdictSlot.innerHTML =
+      '<div class="of-verdict found">항목 대조 (' + stepNo + '/' + total + ') — ' + escapeHtml(f.label) + '</div>' +
+      valueHtml +
+      '<div style="font-size:12px; color:var(--muted); margin-top:6px;">' + nextHint + '</div>';
+    manualRow.style.display = 'flex';
+    reasonInput.value = '';
+    reasonInput.placeholder = '예: ' + f.label + ' 상이';
+  }
 
   document.getElementById('of-confirm').addEventListener('click', () => {
     const finalText = ocrInput.value.trim();
@@ -1082,15 +1213,13 @@
     const row = matchAgainstList(finalText);
     currentRow = row;
     if (row) {
-      let lookup = '<div class="of-lookup">';
-      Object.keys(row).forEach(k => { lookup += escapeHtml(k) + ': ' + escapeHtml(row[k]) + '<br>'; });
-      lookup += '</div>';
-      verdictSlot.innerHTML =
-        '<div class="of-verdict found">TAG "' + escapeHtml(finalText) + '" 리스트에서 찾음 — 아래 등록값과 실물 명판을 육안 비교 후 확인/불일치를 눌러주세요.</div>' + lookup;
+      startFieldCheck(row, finalText, rawOcrText);
+      renderFieldStep();
     } else {
+      fieldCheckActive = false;
       verdictSlot.innerHTML = '<div class="of-verdict unregistered">TAG "' + escapeHtml(finalText) + '" 이(가) 리스트에 없습니다 (미등록)</div>';
+      manualRow.style.display = 'flex';
     }
-    manualRow.style.display = 'flex';
   });
 
   function saveLogEntry(confirmText, mismatchText) {
@@ -1110,11 +1239,26 @@
     renderLog();
   }
   document.getElementById('of-mark-ok').addEventListener('click', () => {
+    if (fieldCheckActive) {
+      fieldIndex++;
+      renderFieldStep();
+      return;
+    }
     saveLogEntry('확인', '');
     manualRow.style.display = 'none';
     if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
   });
   document.getElementById('of-mark-x').addEventListener('click', () => {
+    if (fieldCheckActive) {
+      const f = fieldChecklist[fieldIndex];
+      const reason = reasonInput.value.trim() || (f.label + ' 상이');
+      fieldCheckActive = false;
+      saveLogEntry('', '매칭실패; ' + reason);
+      manualRow.style.display = 'none';
+      reasonInput.value = '';
+      if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
+      return;
+    }
     const reason = reasonInput.value.trim() || (currentRow ? '불일치' : 'TAG 미등록');
     saveLogEntry('', reason);
     manualRow.style.display = 'none';
@@ -1122,6 +1266,7 @@
     if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
   });
   document.getElementById('of-multi-skip').addEventListener('click', () => {
+    fieldCheckActive = false;
     multiIndex++; showNextMultiCandidate();
   });
 
