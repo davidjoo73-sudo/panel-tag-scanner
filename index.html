@@ -16,6 +16,7 @@
 <!-- Panel/TAG Offline Scanner - phone-only, in-browser OCR (Tesseract.js), no cloud AI -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
 <style>
   :root {
     --bg: #14171a; --panel: #1e2226; --panel-2: #24292e; --border: #33383d;
@@ -151,6 +152,10 @@
     <button class="of-shutter" id="of-shutter" disabled></button>
     <button class="of-btn ghost" id="of-switch-cam">전/후면</button>
   </div>
+  <div class="of-controls" style="padding-top:0;">
+    <button class="of-btn primary" id="of-auto-scan" style="width:100%;">🔍 전체 스캔 (QR + 태그 자동 인식)</button>
+  </div>
+  <div id="of-multi-status" style="display:none; padding: 8px 18px; font-size:13px; color:var(--amber);"></div>
 
   <div id="of-error-slot"></div>
 
@@ -158,7 +163,10 @@
     <div class="of-ocr-label">인식 결과 (틀리면 직접 수정)</div>
     <input class="of-ocr-input" id="of-ocr-input" />
     <div class="of-hint" id="of-ocr-hint"></div>
-    <div class="of-row" style="margin-top:8px;">
+    <div class="of-row" id="of-rotate-row" style="margin-top:8px;">
+      <button class="of-btn" id="of-rotate-retry" style="flex:1;">🔄 선택 영역이 기울어져 있으면 회전 후 재인식</button>
+    </div>
+    <div class="of-row" id="of-ai-row" style="margin-top:8px;">
       <button class="of-btn" id="of-ai-retry" style="flex:1;">🤖 선택한 AI로 다시 인식</button>
     </div>
     <button class="of-btn primary" id="of-confirm" style="width:100%; margin-top:10px;">이 값으로 확정</button>
@@ -169,6 +177,9 @@
       <button class="of-btn" id="of-mark-ok" style="color:var(--ok); border-color:var(--ok-dim);">✓ 확인/일치</button>
       <button class="of-btn" id="of-mark-x" style="color:var(--err); border-color:var(--err-dim);">✕ 불일치</button>
       <input class="of-reason" id="of-reason" placeholder="예: MAKER 상이" />
+    </div>
+    <div class="of-row" id="of-multi-skip-row" style="display:none; margin-top:8px;">
+      <button class="of-btn ghost" id="of-multi-skip" style="flex:1;">⏭ 이 후보 건너뛰기 (다음 후보로)</button>
     </div>
   </div>
 
@@ -254,6 +265,7 @@
   let sessionLog = [];
   let correctionMemory = {};
   let scanStage = 'panel'; // 'panel' | 'component'
+  let multiCandidates = [], multiIndex = 0, inMultiReview = false;
   let ocrEngineReady = false;
   let tesseractWorker = null;
   let rawOcrText = '';
@@ -453,7 +465,7 @@
   const logItems = document.getElementById('of-log-items');
 
   let stream = null, facingMode = 'environment', frozen = false;
-  let dragStart = null, dragRect = null;
+  let dragStart = null, dragRect = null, cropRotation = 0; // 0/90/180/270 — 기울어진/세로 태그 대응
 
   async function startCamera() {
     if (stream) stream.getTracks().forEach(t => t.stop());
@@ -481,12 +493,13 @@
     viewHint.style.display = 'block';
     clearError();
     ocrBox.style.display = 'none';
-    dragRect = null; cropRect.style.display = 'none';
+    dragRect = null; cropRect.style.display = 'none'; cropRotation = 0;
   });
   retakeBtn.addEventListener('click', () => {
     frozen = false; retakeBtn.style.display = 'none'; viewHint.style.display = 'none';
     cropRect.style.display = 'none'; ocrBox.style.display = 'none';
     shot.style.display = 'none'; video.style.display = 'block';
+    cropRotation = 0;
   });
   switchCamBtn.addEventListener('click', () => { facingMode = facingMode === 'environment' ? 'user' : 'environment'; startCamera(); });
 
@@ -515,19 +528,64 @@
   function getCroppedCanvas() {
     const naturalW = parseInt(shot.dataset.w || video.videoWidth, 10);
     const naturalH = parseInt(shot.dataset.h || video.videoHeight, 10);
-    const canvas = document.createElement('canvas');
-    const img = new Image();
-    img.src = shot.src;
+    let cw, ch, drawArgs; // drawArgs: [sx, sy, sw, sh] on source image, or null for whole image
     if (!dragRect || dragRect.w < 8 || dragRect.h < 8) {
-      canvas.width = naturalW; canvas.height = naturalH;
-      canvas.getContext('2d').drawImage(shot, 0, 0, naturalW, naturalH);
-      return canvas;
+      cw = naturalW; ch = naturalH; drawArgs = null;
+    } else {
+      const sx = naturalW / dragRect.viewW, sy = naturalH / dragRect.viewH;
+      cw = dragRect.w * sx; ch = dragRect.h * sy;
+      drawArgs = [dragRect.left * sx, dragRect.top * sy, cw, ch];
     }
-    const sx = naturalW / dragRect.viewW, sy = naturalH / dragRect.viewH;
-    const cx = dragRect.left * sx, cy = dragRect.top * sy, cw = dragRect.w * sx, ch = dragRect.h * sy;
-    canvas.width = cw; canvas.height = ch;
-    canvas.getContext('2d').drawImage(shot, cx, cy, cw, ch, 0, 0, cw, ch);
-    return canvas;
+    const cropCanvas = document.createElement('canvas');
+    cropCanvas.width = cw; cropCanvas.height = ch;
+    const cctx = cropCanvas.getContext('2d');
+    if (drawArgs) cctx.drawImage(shot, drawArgs[0], drawArgs[1], drawArgs[2], drawArgs[3], 0, 0, cw, ch);
+    else cctx.drawImage(shot, 0, 0, cw, ch);
+
+    if (!cropRotation) return cropCanvas;
+    const rotated = document.createElement('canvas');
+    const swap = cropRotation === 90 || cropRotation === 270;
+    rotated.width = swap ? ch : cw;
+    rotated.height = swap ? cw : ch;
+    const rctx = rotated.getContext('2d');
+    rctx.translate(rotated.width / 2, rotated.height / 2);
+    rctx.rotate((cropRotation * Math.PI) / 180);
+    rctx.drawImage(cropCanvas, -cw / 2, -ch / 2);
+    return rotated;
+  }
+
+  // ---------- OCR 전처리: 확대 + 흑백 + 대비 강화(스트레칭) — 오프라인 OCR 정확도 개선용 ----------
+  // (주의) 강제 이진화(흑/백 두 값으로만 자르는 방식)는 조명에 따라 화면이 통째로
+  // 하얗게/까맣게 뭉개질 위험이 있어, 대신 "대비 스트레칭"만 적용해 정보 손실 없이 선명하게 만든다.
+  function preprocessForOCR(srcCanvas) {
+    const longSide = Math.max(srcCanvas.width, srcCanvas.height, 1);
+    const upScale = Math.max(1, Math.min(4, 500 / longSide));
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.round(srcCanvas.width * upScale));
+    out.height = Math.max(1, Math.round(srcCanvas.height * upScale));
+    const ctx = out.getContext('2d');
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(srcCanvas, 0, 0, out.width, out.height);
+
+    const imgData = ctx.getImageData(0, 0, out.width, out.height);
+    const d = imgData.data;
+    const n = d.length / 4;
+    const gray = new Float32Array(n);
+    let min = 255, max = 0;
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      const g = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      gray[j] = g;
+      if (g < min) min = g;
+      if (g > max) max = g;
+    }
+    const range = Math.max(1, max - min);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      const v = Math.max(0, Math.min(255, ((gray[j] - min) / range) * 255));
+      d[i] = d[i + 1] = d[i + 2] = v;
+    }
+    ctx.putImageData(imgData, 0, 0);
+    return out;
   }
 
   // ---------- AI 보조 인식 (오프라인 OCR이 안 읽힐 때만 선택 사용) ----------
@@ -678,6 +736,11 @@
       }
       engineStatusEl.textContent = 'OCR 엔진 다운로드 중… (최초 1회만, 몇 MB)';
       tesseractWorker = await Tesseract.createWorker('eng');
+      // 태그/선번호는 보통 영문+숫자+일부 기호이므로, 짧은 한 줄로 보고 문자 범위를 제한하면 오인식이 크게 줄어듭니다.
+      await tesseractWorker.setParameters({
+        tessedit_pageseg_mode: '6', // PSM.SINGLE_BLOCK — 태그가 2줄인 경우가 많아 단일블록 모드가 더 정확함(실사진 테스트로 확인)
+        tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.#/ '
+      });
       ocrEngineReady = true;
       engineStatusEl.textContent = 'OCR 엔진 준비 완료 (오프라인 인식 가능)';
     } catch (e) {
@@ -695,7 +758,12 @@
     ocrHint.textContent = '';
     verdictSlot.innerHTML = ''; manualRow.style.display = 'none';
     try {
-      const canvas = getCroppedCanvas();
+      let canvas;
+      try {
+        canvas = preprocessForOCR(getCroppedCanvas());
+      } catch (preErr) {
+        canvas = getCroppedCanvas(); // 전처리 실패 시 원본 크롭으로 대체(완전 실패 방지)
+      }
       const { data: { text } } = await tesseractWorker.recognize(canvas);
       const raw = (text || '').replace(/\s+/g, '').trim();
       rawOcrText = raw;
@@ -719,6 +787,213 @@
       runOcrOnCrop();
     }
   });
+
+  document.getElementById('of-rotate-retry').addEventListener('click', () => {
+    cropRotation = (cropRotation + 90) % 360;
+    ocrHint.textContent = '회전 ' + cropRotation + '도 적용 후 다시 인식 중…';
+    runOcrOnCrop();
+  });
+
+  // ---------- 전체 스캔 (QR + 판넬 전체 태그 인식 통합) ----------
+  // 화면 전체를 OCR로 훑어서 나온 조각들을, 이미 불러온 BM/TB LIST의 TAG 값들과 대조해
+  // "후보"만 추려낸다. 노이즈(나사/그림자 등 오인식)가 섞일 수 있어 자동 확정하지 않고
+  // 반드시 한 개씩 사람이 확인하도록 만들었다.
+  const multiStatusEl = document.getElementById('of-multi-status');
+
+  function fuzzyFindInList(token) {
+    const tn = normKey(token);
+    if (tn.length < 3 || !refKeyCol) return null;
+    let pool = refList;
+    if (refPanelCol && selectedPanel) pool = refList.filter(r => normKey(r[refPanelCol]) === normKey(selectedPanel));
+    for (const row of pool) {
+      if (normKey(row[refKeyCol]) === tn) return row;
+    }
+    for (const row of pool) {
+      const kn = normKey(row[refKeyCol]);
+      if (!kn) continue;
+      if (Math.abs(kn.length - tn.length) <= 1 && levenshtein(kn, tn) <= 1) return row;
+    }
+    return null;
+  }
+
+  function showNextMultiCandidate() {
+    if (multiIndex >= multiCandidates.length) {
+      inMultiReview = false;
+      multiStatusEl.textContent = '모든 후보(' + multiCandidates.length + '개) 확인을 마쳤습니다.';
+      ocrBox.style.display = 'none';
+      document.getElementById('of-multi-skip-row').style.display = 'none';
+      document.getElementById('of-rotate-row').style.display = 'flex';
+      document.getElementById('of-ai-row').style.display = 'flex';
+      return;
+    }
+    const cand = multiCandidates[multiIndex];
+    ocrBox.style.display = 'block';
+    document.getElementById('of-rotate-row').style.display = 'none';
+    document.getElementById('of-ai-row').style.display = 'none';
+    document.getElementById('of-multi-skip-row').style.display = 'flex';
+    rawOcrText = cand.raw;
+    const kindLabel = cand.kind === 'QR' ? 'QR' : (cand.kind === 'CROP' ? '선택영역' : 'TAG');
+    if (cand.row) {
+      ocrInput.value = cand.row[refKeyCol];
+      currentValue = cand.row[refKeyCol];
+      currentRow = cand.row;
+      ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 원문: "' + cand.raw + '" → 리스트 후보';
+      let lookup = '<div class="of-lookup">';
+      Object.keys(cand.row).forEach(k => { lookup += escapeHtml(k) + ': ' + escapeHtml(cand.row[k]) + '<br>'; });
+      lookup += '</div>';
+      verdictSlot.innerHTML =
+        '<div class="of-verdict found">후보 발견 — 실물 명판과 비교 후 확인/불일치를 누르거나, 후보가 아니면 건너뛰세요.</div>' + lookup;
+    } else {
+      ocrInput.value = cand.raw;
+      currentValue = cand.raw;
+      currentRow = null;
+      ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 리스트와 자동 매칭되지 않았습니다. 필요하면 직접 수정하세요.';
+      verdictSlot.innerHTML =
+        '<div class="of-verdict unregistered">' + kindLabel + ' 내용: "' + escapeHtml(cand.raw) + '" — 리스트에 없거나 QR/URL 내용입니다.</div>';
+    }
+    manualRow.style.display = 'flex';
+  }
+
+  function boxesCloseVertically(a, b) {
+    const xOverlap = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+    const widthMin = Math.min(a.x1 - a.x0, b.x1 - b.x0);
+    if (widthMin <= 0 || xOverlap < widthMin * 0.3) return false; // 가로 위치가 충분히 겹쳐야 같은 라벨로 봄
+    const avgH = ((a.y1 - a.y0) + (b.y1 - b.y0)) / 2;
+    const vGap = Math.max(0, Math.max(a.y0, b.y0) - Math.min(a.y1, b.y1));
+    return vGap < avgH * 1.2; // 세로로 가까이 붙어있으면(2줄 태그) 같은 그룹으로 묶음
+  }
+
+  function mergeBbox(list) {
+    return {
+      x0: Math.min(...list.map(w => w.bbox.x0)),
+      y0: Math.min(...list.map(w => w.bbox.y0)),
+      x1: Math.max(...list.map(w => w.bbox.x1)),
+      y1: Math.max(...list.map(w => w.bbox.y1))
+    };
+  }
+
+  function clusterWordsIntoLabels(words) {
+    // 태그가 "300" / "ELB4"처럼 위아래 2줄로 나뉘어 인식되는 경우가 많아,
+    // 위치가 가까운 단어들을 하나로 합쳐 실제 태그 형태("300ELB4")로 재구성한다.
+    // 반환값: [{ text, bbox }] — bbox는 이후 읽기 순서 정렬에 사용.
+    const valid = words.filter(w => w.text && w.text.trim() && w.bbox);
+    if (!valid.length) return [];
+    const used = new Array(valid.length).fill(false);
+    const groups = [];
+    for (let i = 0; i < valid.length; i++) {
+      if (used[i]) continue;
+      const group = [valid[i]]; used[i] = true;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let j = 0; j < valid.length; j++) {
+          if (used[j]) continue;
+          if (group.some(g => boxesCloseVertically(g.bbox, valid[j].bbox))) {
+            group.push(valid[j]); used[j] = true; changed = true;
+          }
+        }
+      }
+      groups.push(group);
+    }
+    return groups.map(g => {
+      g.sort((a, b) => (a.bbox.y0 - b.bbox.y0) || (a.bbox.x0 - b.bbox.x0));
+      return { text: g.map(w => w.text).join(''), bbox: mergeBbox(g) };
+    });
+  }
+
+  // 사람이 판넬을 눈으로 훑는 순서(위쪽 줄부터, 각 줄은 왼쪽→오른쪽)로 후보를 정렬한다.
+  function sortInReadingOrder(items) {
+    const withBox = items.filter(c => c.bbox);
+    const withoutBox = items.filter(c => !c.bbox);
+    if (!withBox.length) return items;
+    const avgH = withBox.reduce((s, c) => s + (c.bbox.y1 - c.bbox.y0), 0) / withBox.length;
+    const rowTolerance = Math.max(10, avgH * 0.6);
+    withBox.sort((a, b) => a.bbox.y0 - b.bbox.y0);
+    let rowIdx = 0, rowStartY = withBox[0].bbox.y0;
+    withBox.forEach((c) => {
+      if (c.bbox.y0 - rowStartY > rowTolerance) { rowIdx++; rowStartY = c.bbox.y0; }
+      c._row = rowIdx;
+    });
+    withBox.sort((a, b) => (a._row - b._row) || (a.bbox.x0 - b.bbox.x0));
+    return withBox.concat(withoutBox);
+  }
+
+  document.getElementById('of-auto-scan').addEventListener('click', async () => {
+    if (!ocrEngineReady || !tesseractWorker) { showError('OCR 엔진이 아직 준비되지 않았습니다.'); return; }
+    if (!refList.length) { showError('먼저 BM/TB LIST를 불러와주세요.'); return; }
+    clearError();
+    multiStatusEl.style.display = 'block';
+    multiStatusEl.textContent = '전체 스캔 중… (QR + 태그 자동 인식, 몇 초 걸릴 수 있습니다)';
+    try {
+      const canvas = document.createElement('canvas');
+      let sw, sh, sourceEl;
+      if (frozen) { sourceEl = shot; sw = parseInt(shot.dataset.w || 0, 10); sh = parseInt(shot.dataset.h || 0, 10); }
+      else { sourceEl = video; sw = video.videoWidth; sh = video.videoHeight; }
+      if (!sw || !sh) { showError('카메라 화면을 아직 읽을 수 없습니다.'); multiStatusEl.style.display = 'none'; return; }
+      canvas.width = sw; canvas.height = sh;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(sourceEl, 0, 0, sw, sh);
+
+      let candidates = [];
+
+      // 1) QR 코드 우선 시도
+      if (typeof jsQR !== 'undefined') {
+        try {
+          const imgData = ctx.getImageData(0, 0, sw, sh);
+          const code = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
+          if (code && code.data) candidates.push({ raw: code.data, row: null, bbox: null, kind: 'QR' });
+        } catch (e) { /* QR 실패는 무시하고 계속 진행 */ }
+      }
+
+      // 2) 손가락으로 선택한 영역이 있으면 그 부분도 우선 인식해서 후보에 추가
+      if (frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
+        try {
+          const cropCanvas = preprocessForOCR(getCroppedCanvas());
+          const { data: cropData } = await tesseractWorker.recognize(cropCanvas);
+          const rawCrop = (cropData.text || '').replace(/\s+/g, '').trim();
+          if (rawCrop) candidates.push({ raw: rawCrop, row: fuzzyFindInList(rawCrop), bbox: null, kind: 'CROP' });
+        } catch (e) { /* 실패해도 전체 스캔은 계속 진행 */ }
+      }
+
+      // 3) 화면 전체를 훑어서 리스트와 일치하는 태그 후보를 찾음
+      const pre = preprocessForOCR(canvas);
+      await tesseractWorker.setParameters({ tessedit_pageseg_mode: '11' }); // 희소 텍스트 모드(여러 조각을 흩어서 찾음)
+      const { data } = await tesseractWorker.recognize(pre);
+      await tesseractWorker.setParameters({ tessedit_pageseg_mode: '6' }); // 단일 태그 인식용 기본값으로 복구
+
+      const rawWords = (data.words || []);
+      const individualTokens = rawWords.map(w => ({ text: w.text, bbox: w.bbox })).filter(t => t.text);
+      const clusteredTokens = clusterWordsIntoLabels(rawWords);
+      const tokens = clusteredTokens.length
+        ? clusteredTokens.concat(individualTokens) // 합쳐진 형태를 우선 시도하고, 개별 단어도 보조로 시도
+        : (individualTokens.length ? individualTokens : (data.text || '').split(/\s+/).filter(Boolean).map(t => ({ text: t, bbox: null })));
+
+      const seen = new Set(candidates.filter(c => c.row).map(c => normKey(c.row[refKeyCol])));
+      let ocrCandidates = [];
+      tokens.forEach((tok) => {
+        const row = fuzzyFindInList(tok.text);
+        if (row) {
+          const key = normKey(row[refKeyCol]);
+          if (!seen.has(key)) { seen.add(key); ocrCandidates.push({ raw: tok.text, row, bbox: tok.bbox, kind: 'TAG' }); }
+        }
+      });
+      ocrCandidates = sortInReadingOrder(ocrCandidates);
+      candidates = candidates.concat(ocrCandidates);
+
+      multiCandidates = candidates;
+      multiIndex = 0;
+      inMultiReview = candidates.length > 0;
+      if (!candidates.length) {
+        multiStatusEl.textContent = '아무 것도 찾지 못했습니다. 더 가깝고 선명하게 다시 시도해보세요.';
+      } else {
+        multiStatusEl.textContent = candidates.length + '개 발견(QR/선택영역/태그 포함) — 아래에서 하나씩 확인하세요.';
+        showNextMultiCandidate();
+      }
+    } catch (e) {
+      showError('전체 스캔 중 오류: ' + e.message);
+      multiStatusEl.style.display = 'none';
+    }
+  });
   // also allow OCR on the whole frozen frame via a tap without dragging (fallback)
   viewEl.addEventListener('dblclick', () => { if (frozen) { dragRect = null; runOcrOnCrop(); } });
 
@@ -728,6 +1003,10 @@
   document.getElementById('of-confirm').addEventListener('click', () => {
     const finalText = ocrInput.value.trim();
     if (!finalText) { showError('값이 비어 있습니다.'); return; }
+    inMultiReview = false;
+    document.getElementById('of-multi-skip-row').style.display = 'none';
+    document.getElementById('of-rotate-row').style.display = 'flex';
+    document.getElementById('of-ai-row').style.display = 'flex';
     if (recordCorrection(rawOcrText, finalText)) {
       ocrHint.textContent = '교정 내용을 학습했습니다 (다음에 비슷한 오독 시 자동 제안됩니다).';
     }
@@ -777,12 +1056,20 @@
     saveSessionLogToStorage();
     renderLog();
   }
-  document.getElementById('of-mark-ok').addEventListener('click', () => { saveLogEntry('확인', ''); manualRow.style.display = 'none'; });
+  document.getElementById('of-mark-ok').addEventListener('click', () => {
+    saveLogEntry('확인', '');
+    manualRow.style.display = 'none';
+    if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
+  });
   document.getElementById('of-mark-x').addEventListener('click', () => {
     const reason = reasonInput.value.trim() || (currentRow ? '불일치' : 'TAG 미등록');
     saveLogEntry('', reason);
     manualRow.style.display = 'none';
     reasonInput.value = '';
+    if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
+  });
+  document.getElementById('of-multi-skip').addEventListener('click', () => {
+    multiIndex++; showNextMultiCandidate();
   });
 
   const LOG_FIELDS = ['시간','PANEL','TAG','확인/일치','불일치 사유','MAKER','MODEL_NO','SERIAL_NO','SPEC'];
