@@ -4,7 +4,7 @@
 //   인터넷이 안 될 때만 저장해둔(캐시) 예전 버전을 보여줌. => 코드 수정 시 자동 반영됨.
 // - 아이콘/매니페스트/OCR 엔진 등 무거운 정적 파일: "캐시 우선" -> 한 번 받으면 계속 재사용해서
 //   매번 다시 다운로드하지 않음(속도/오프라인 안정성 유지).
-const CACHE_NAME = 'panel-tag-scanner-v24';
+const CACHE_NAME = 'panel-tag-scanner-v25';
 const APP_SHELL = [
   './',
   './index.html',

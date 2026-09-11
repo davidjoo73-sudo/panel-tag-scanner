@@ -938,6 +938,12 @@
     document.getElementById('of-ai-row').style.display = 'none';
     document.getElementById('of-multi-skip-row').style.display = 'flex';
     rawOcrText = cand.raw;
+    if (cand.previewSrc) {
+      cropPreview.src = cand.previewSrc;
+      cropPreview.style.display = 'block';
+    } else {
+      cropPreview.style.display = 'none';
+    }
     const kindLabel = cand.kind === 'QR' ? 'QR' : (cand.kind === 'CROP' ? '선택영역' : 'TAG');
     if (cand.row) {
       ocrInput.value = cand.row[refKeyCol];
@@ -1093,8 +1099,9 @@
 
       if (ocrAvailable && frozen && dragRect && dragRect.w > 8 && dragRect.h > 8) {
         try {
-          const { text: rawCrop } = await recognizeTextRobust(getCroppedCanvas());
-          if (rawCrop) candidates.push({ raw: rawCrop, row: fuzzyFindInList(rawCrop), bbox: null, kind: 'CROP' });
+          const cropForOcr = getCroppedCanvas();
+          const { text: rawCrop } = await recognizeTextRobust(cropForOcr);
+          if (rawCrop) candidates.push({ raw: rawCrop, row: fuzzyFindInList(rawCrop), bbox: null, kind: 'CROP', previewSrc: cropForOcr.toDataURL('image/png') });
         } catch (e) { /* 실패해도 전체 스캔은 계속 진행 */ }
       }
 
