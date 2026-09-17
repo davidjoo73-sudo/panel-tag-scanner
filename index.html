@@ -141,6 +141,9 @@
   <div class="of-stage-banner" id="of-stage-banner"></div>
 
   <div class="of-view" id="of-view">
+    <video id="of-qr-video" autoplay playsinline muted style="display:none; width:100%; height:100%; object-fit:cover; position:absolute; top:0; left:0;"></video>
+    <div id="of-qr-frame" style="display:none; position:absolute; left:15%; top:25%; width:70%; height:50%; border:3px solid var(--amber); border-radius:12px; pointer-events:none;"></div>
+    <div id="of-qr-hint" style="display:none; position:absolute; bottom:10px; left:0; right:0; text-align:center; color:#fff; font-size:13px; text-shadow:0 1px 3px #000;">QR코드를 사각형 안에 비춰주세요 (자동 인식)</div>
     <img id="of-shot" style="display:none;" />
     <div class="of-crop-rect" id="of-crop-rect"></div>
     <div class="of-view-hint" id="of-view-hint" style="display:none;">정지 화면 위를 손가락으로 드래그해서 글자 부분만 선택하세요</div>
@@ -156,6 +159,9 @@
     <button class="of-btn" id="of-import-photo" style="width:100%;">🖼️ 갤러리에서 사진 선택(이미 찍은 사진)</button>
     <input type="file" id="of-shutter-input" accept="image/*" capture="environment" style="display:none;" />
     <input type="file" id="of-import-photo-input" accept="image/*" style="display:none;" />
+  </div>
+  <div class="of-controls" style="padding-top:0;">
+    <button class="of-btn" id="of-qr-live-toggle" style="width:100%;">📷 QR 실시간 스캔 시작</button>
   </div>
   <div class="of-controls" style="padding-top:0;">
     <button class="of-btn primary" id="of-auto-scan" style="width:100%;">🔍 전체 스캔 (QR + 태그 자동 인식)</button>
@@ -623,6 +629,91 @@
     e.target.value = '';
     if (!f) return;
     loadImageFileToCanvas(f, freezeFromCanvas);
+  });
+
+  // ---------- QR 실시간 스캔 ----------
+  // 텍스트 태그(작은 각인체 글자)는 고화질이 필요해 기본 카메라 앱으로 촬영하는 방식을 쓰지만,
+  // QR코드는 저해상도 라이브 영상으로도 충분히 잘 읽히므로, 카메라를 갖다 대기만 하면
+  // 자동으로 인식되는 실시간 스캔 모드를 별도로 둔다.
+  const qrVideo = document.getElementById('of-qr-video');
+  const qrFrame = document.getElementById('of-qr-frame');
+  const qrHintEl = document.getElementById('of-qr-hint');
+  const qrLiveToggleBtn = document.getElementById('of-qr-live-toggle');
+  let qrStream = null, qrScanning = false, qrAnimHandle = null;
+  const qrScanCanvas = document.createElement('canvas');
+
+  async function startQrLiveScan() {
+    try {
+      qrStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: facingMode }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false,
+      });
+    } catch (err) {
+      showError('카메라를 사용할 수 없습니다: ' + err.message);
+      return;
+    }
+    qrVideo.srcObject = qrStream;
+    qrVideo.style.display = 'block';
+    qrFrame.style.display = 'block';
+    qrHintEl.style.display = 'block';
+    shot.style.display = 'none';
+    viewPlaceholder.style.display = 'none';
+    cropRect.style.display = 'none';
+    ocrBox.style.display = 'none';
+    qrLiveToggleBtn.textContent = '⏹ QR 실시간 스캔 중지';
+    qrScanning = true;
+    clearError();
+    requestAnimationFrame(scanQrFrame);
+  }
+
+  function stopQrLiveScan(showPrevious) {
+    qrScanning = false;
+    if (qrAnimHandle) cancelAnimationFrame(qrAnimHandle);
+    if (qrStream) { qrStream.getTracks().forEach(t => t.stop()); qrStream = null; }
+    qrVideo.style.display = 'none';
+    qrFrame.style.display = 'none';
+    qrHintEl.style.display = 'none';
+    qrLiveToggleBtn.textContent = '📷 QR 실시간 스캔 시작';
+    if (showPrevious !== false) {
+      if (frozen) { shot.style.display = 'block'; } else { viewPlaceholder.style.display = 'flex'; }
+    }
+  }
+
+  function scanQrFrame() {
+    if (!qrScanning) return;
+    if (qrVideo.readyState >= 2 && typeof jsQR !== 'undefined') {
+      const w = qrVideo.videoWidth, h = qrVideo.videoHeight;
+      if (w && h) {
+        qrScanCanvas.width = w; qrScanCanvas.height = h;
+        const qctx = qrScanCanvas.getContext('2d');
+        qctx.drawImage(qrVideo, 0, 0, w, h);
+        try {
+          const imgData = qctx.getImageData(0, 0, w, h);
+          const code = jsQR(imgData.data, w, h, { inversionAttempts: 'attemptBoth' });
+          if (code && code.data) {
+            if (navigator.vibrate) navigator.vibrate(80);
+            stopQrLiveScan(false);
+            viewPlaceholder.style.display = frozen ? 'none' : 'flex';
+            if (frozen) shot.style.display = 'block';
+            rawOcrText = code.data;
+            ocrInput.value = code.data;
+            ocrBox.style.display = 'block';
+            document.getElementById('of-multi-skip-row').style.display = 'none';
+            document.getElementById('of-rotate-row').style.display = 'none';
+            document.getElementById('of-ai-row').style.display = 'none';
+            cropPreview.style.display = 'none';
+            ocrHint.textContent = 'QR 실시간 인식됨: "' + code.data + '" (필요하면 직접 수정 후 확정)';
+            verdictSlot.innerHTML = '<div class="of-verdict found">📷 QR 자동 인식 완료 — 아래에서 확인 후 확정하세요.</div>';
+            return;
+          }
+        } catch (e) { /* 프레임 하나 실패는 무시하고 계속 시도 */ }
+      }
+    }
+    qrAnimHandle = requestAnimationFrame(scanQrFrame);
+  }
+
+  qrLiveToggleBtn.addEventListener('click', () => {
+    if (qrScanning) stopQrLiveScan(); else startQrLiveScan();
   });
 
   // ---------- crop selection (pointer events: works for touch + mouse) ----------
