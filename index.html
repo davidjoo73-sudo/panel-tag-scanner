@@ -1060,10 +1060,14 @@
   }
 
   async function callGemini(apiKey, model, base64, prompt) {
-    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent?key=' + encodeURIComponent(apiKey);
+    // 2026년 중반부터 구글이 API 키를 URL 뒤에 붙이는 옛 방식("?key=...", AIzaSy로 시작하는
+    // Standard 키)에서, HTTP 헤더로 보내는 새 방식(x-goog-api-key, AQ.로 시작하는 Auth 키)으로
+    // 전환했다. 9월부터는 옛 방식의 키가 완전히 막히므로, 새 키/옛 키 모두 통하는 헤더 방식을
+    // 기본으로 쓴다(옛 AIzaSy 키도 헤더 방식으로 정상 동작함).
+    const url = 'https://generativelanguage.googleapis.com/v1beta/models/' + encodeURIComponent(model) + ':generateContent';
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify({ contents: [{ parts: [ { text: prompt }, { inline_data: { mime_type: 'image/jpeg', data: base64 } } ] }] })
     });
     const data = await res.json();
@@ -1103,6 +1107,8 @@
       let msg = e.message || String(e);
       if (/not found|404|no longer available/i.test(msg)) {
         msg += ' — 모델명이 오래되어 서비스가 종료됐을 수 있습니다. "API 키 설정"에서 모델명 칸을 확인/수정해주세요.';
+      } else if (/unauthenticated|401|access_token_type_unsupported|invalid.{0,10}(api)?.{0,10}key/i.test(msg)) {
+        msg += ' — API 키 자체가 잘못됐거나 만료됐을 수 있습니다. Google AI Studio에서 키를 다시 확인/재발급해주세요.';
       }
       showError('AI 인식 중 오류: ' + msg);
     } finally {
@@ -1164,6 +1170,8 @@
       let msg = e.message || String(e);
       if (/not found|404|no longer available/i.test(msg)) {
         msg += ' — 모델명이 오래되어 서비스가 종료됐을 수 있습니다. "API 키 설정"에서 모델명 칸을 확인/수정해주세요.';
+      } else if (/unauthenticated|401|access_token_type_unsupported|invalid.{0,10}(api)?.{0,10}key/i.test(msg)) {
+        msg += ' — API 키 자체가 잘못됐거나 만료됐을 수 있습니다. Google AI Studio에서 키를 다시 확인/재발급해주세요.';
       }
       showError('AI 인식 중 오류: ' + msg);
     } finally {
