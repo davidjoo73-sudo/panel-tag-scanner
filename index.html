@@ -185,6 +185,7 @@
     <button class="of-btn primary" id="of-confirm" style="width:100%; margin-top:10px;">이 값으로 확정</button>
 
     <div id="of-verdict-slot"></div>
+    <button class="of-btn primary" id="of-fieldlist-confirm" style="width:100%; display:none; margin-top:6px;" disabled>전체 확정 (모든 항목 확인 후 활성화)</button>
 
     <div class="of-manual" id="of-manual-row" style="display:none;">
       <button class="of-btn" id="of-mark-ok" style="color:var(--ok); border-color:var(--ok-dim);">✓ 확인/일치</button>
@@ -736,11 +737,12 @@
               currentValue = tagVal;
               ocrHint.textContent = 'QR 안에서 등록된 TAG 발견: "' + tagVal + '" (원문: "' + code.data + '")';
               startFieldCheck(row, tagVal, code.data);
-              renderFieldStep();
+              renderFieldList();
             } else {
               ocrInput.value = code.data;
               currentValue = code.data;
               fieldCheckActive = false;
+              fieldListConfirmBtn.style.display = 'none';
               ocrHint.textContent = 'QR 실시간 인식됨: "' + code.data + '" (리스트에 없음 — 필요하면 직접 수정 후 확정)';
               verdictSlot.innerHTML = '<div class="of-verdict unregistered">QR 내용: "' + escapeHtml(code.data) + '" — 리스트에서 찾지 못함</div>';
               manualRow.style.display = 'flex';
@@ -1215,7 +1217,7 @@
       currentRow = cand.row;
       ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 원문: "' + cand.raw + '" → 리스트 후보';
       startFieldCheck(cand.row, cand.row[refKeyCol], cand.raw);
-      renderFieldStep();
+      renderFieldList();
       return;
     } else {
       ocrInput.value = cand.raw;
@@ -1223,6 +1225,7 @@
       currentRow = null;
       fieldCheckActive = false;
       ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 리스트와 자동 매칭되지 않았습니다. 필요하면 직접 수정하세요.';
+      fieldListConfirmBtn.style.display = 'none';
       verdictSlot.innerHTML =
         '<div class="of-verdict unregistered">' + kindLabel + ' 내용: "' + escapeHtml(cand.raw) + '" — 리스트에 없거나 QR/URL 내용입니다.</div>';
     }
@@ -1421,53 +1424,91 @@
 
   // ---------- confirm / match ----------
   let currentValue = '', currentRow = null;
-  let fieldChecklist = [], fieldIndex = 0, fieldCheckActive = false;
+  let fieldChecklist = [], fieldStatuses = [], fieldReasons = [], fieldCheckActive = false;
+  const fieldListConfirmBtn = document.getElementById('of-fieldlist-confirm');
 
-  // TAG가 리스트에서 매칭되면, 전체를 한번에 확인/불일치 처리하지 않고
-  // DEVICE TAG → DESCRIPTION → MODEL → ORDER SPEC.2 → MAKER → (비고, 있을 때만)
-  // 순서로 한 항목씩 실물과 대조하도록 안내한다. 중간에 하나라도 다르면 그 자리에서
-  // "매칭실패; <항목명> 상이"로 즉시 기록하고, 모두 일치하면 "OK 일치완료"로 기록한다.
+  // TAG가 리스트에서 매칭되면, DEVICE TAG → DESCRIPTION → MODEL → ORDER SPEC.2 → MAKER →
+  // (비고, 있을 때만) 전체를 한 화면에 목록으로 다 보여주고, 항목마다 개별로 확인/불일치를
+  // 누를 수 있게 한다. 모든 항목에 답을 하면 "전체 확정" 버튼이 활성화되고, 그걸 누르면
+  // 전부 일치했으면 "OK 일치완료", 하나라도 불일치가 있으면 "매칭실패; <항목명> 상이"로 기록한다.
   function startFieldCheck(row, tagListValue, tagRawValue) {
     fieldChecklist = buildFieldChecklist(row, tagListValue, tagRawValue);
-    fieldIndex = 0;
+    fieldStatuses = new Array(fieldChecklist.length).fill(null);
+    fieldReasons = new Array(fieldChecklist.length).fill('');
     fieldCheckActive = true;
   }
 
-  function renderFieldStep() {
-    if (fieldIndex >= fieldChecklist.length) {
-      fieldCheckActive = false;
-      saveLogEntry('OK 일치완료', '');
-      manualRow.style.display = 'none';
-      verdictSlot.innerHTML = '<div class="of-verdict found">✅ OK 일치완료 — 모든 항목이 일치했습니다.</div>';
-      if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
-      return;
-    }
-    const f = fieldChecklist[fieldIndex];
-    const stepNo = fieldIndex + 1, total = fieldChecklist.length;
-    const next = fieldChecklist[fieldIndex + 1];
-    const nextHint = next
-      ? '확인/일치를 누르면 다음: <b>' + escapeHtml(next.label) + '</b>'
-      : '확인/일치를 누르면 마지막 항목 완료 → <b>OK 일치완료</b>로 기록됩니다';
-    let valueHtml;
+  function fieldValueHtml(f) {
     if (f.rawValue !== undefined) {
       // DEVICE TAG 단계는 "리스트에 등록된 값"과 "실제로 인식/입력된 값"을 항상 같이 보여준다.
       const mismatch = f.rawValue && normKey(f.rawValue) !== normKey(f.value);
-      valueHtml =
-        '<div style="font-size:12px; color:var(--muted); margin-bottom:2px;">리스트(LIST)</div>' +
-        '<div style="font-size:17px; font-weight:700;">' + escapeHtml(f.value) + '</div>' +
-        '<div style="font-size:12px; color:var(--muted); margin:8px 0 2px;">인식된 값</div>' +
-        '<div style="font-size:17px; font-weight:700;' + (mismatch ? ' color:var(--err);' : ' color:var(--ok);') + '">' + escapeHtml(f.rawValue || f.value) + '</div>';
-    } else {
-      valueHtml = '<div class="of-lookup" style="font-size:17px; font-weight:700;">' + escapeHtml(f.value) + '</div>';
+      return '<div style="font-size:11px; color:var(--muted);">리스트: <b style="font-size:14px;">' + escapeHtml(f.value) + '</b></div>' +
+        '<div style="font-size:11px; color:var(--muted); margin-top:2px;">인식된 값: <b style="font-size:14px;' + (mismatch ? ' color:var(--err);' : ' color:var(--ok);') + '">' + escapeHtml(f.rawValue || f.value) + '</b></div>';
     }
-    verdictSlot.innerHTML =
-      '<div class="of-verdict found">항목 대조 (' + stepNo + '/' + total + ') — ' + escapeHtml(f.label) + '</div>' +
-      valueHtml +
-      '<div style="font-size:12px; color:var(--muted); margin-top:6px;">' + nextHint + '</div>';
-    manualRow.style.display = 'flex';
-    reasonInput.value = '';
-    reasonInput.placeholder = '예: ' + f.label + ' 상이';
+    return '<div style="font-size:16px; font-weight:700;">' + escapeHtml(f.value) + '</div>';
   }
+
+  function renderFieldList() {
+    manualRow.style.display = 'none';
+    let html = '<div class="of-verdict found">아래 ' + fieldChecklist.length + '개 항목을 실물과 대조하며 하나씩 확인/불일치를 눌러주세요.</div>';
+    html += '<div id="of-field-items">';
+    fieldChecklist.forEach((f, i) => {
+      const st = fieldStatuses[i];
+      const border = st === 'ok' ? 'var(--ok-dim)' : (st === 'x' ? 'var(--err-dim)' : 'var(--border)');
+      const bg = st === 'ok' ? 'rgba(60,180,120,0.08)' : (st === 'x' ? 'rgba(220,80,80,0.08)' : 'transparent');
+      html += '<div style="border:1px solid ' + border + '; background:' + bg + '; border-radius:8px; padding:8px 10px; margin-top:8px; display:flex; align-items:center; gap:10px;">' +
+        '<div style="flex:1; min-width:0;">' +
+        '<div style="font-size:11px; color:var(--amber); font-weight:600;">' + escapeHtml(f.label) + '</div>' +
+        fieldValueHtml(f) +
+        (st === 'x' ? '<div style="font-size:11px; color:var(--err); margin-top:2px;">' + escapeHtml(fieldReasons[i]) + '</div>' : '') +
+        '</div>' +
+        '<div style="display:flex; flex-direction:column; gap:6px;">' +
+        '<button class="of-btn of-fitem-ok" data-idx="' + i + '" style="padding:4px 10px; font-size:13px; color:var(--ok); border-color:var(--ok-dim);' + (st === 'ok' ? ' opacity:1;' : ' opacity:0.6;') + '">✓</button>' +
+        '<button class="of-btn of-fitem-x" data-idx="' + i + '" style="padding:4px 10px; font-size:13px; color:var(--err); border-color:var(--err-dim);' + (st === 'x' ? ' opacity:1;' : ' opacity:0.6;') + '">✕</button>' +
+        '</div>' +
+        '</div>';
+    });
+    html += '</div>';
+    verdictSlot.innerHTML = html;
+
+    const allAnswered = fieldStatuses.every(s => s !== null);
+    fieldListConfirmBtn.style.display = 'block';
+    fieldListConfirmBtn.disabled = !allAnswered;
+    fieldListConfirmBtn.textContent = allAnswered
+      ? (fieldStatuses.every(s => s === 'ok') ? '✅ 전체 확정 — OK 일치완료' : '⚠️ 전체 확정 — 매칭실패로 기록')
+      : '전체 확정 (모든 항목 확인 후 활성화)';
+  }
+
+  verdictSlot.addEventListener('click', (e) => {
+    if (!fieldCheckActive) return;
+    const okBtn = e.target.closest('.of-fitem-ok');
+    const xBtn = e.target.closest('.of-fitem-x');
+    if (okBtn) {
+      const i = parseInt(okBtn.dataset.idx, 10);
+      fieldStatuses[i] = 'ok'; fieldReasons[i] = '';
+      renderFieldList();
+    } else if (xBtn) {
+      const i = parseInt(xBtn.dataset.idx, 10);
+      fieldStatuses[i] = 'x'; fieldReasons[i] = fieldChecklist[i].label + ' 상이';
+      renderFieldList();
+    }
+  });
+
+  fieldListConfirmBtn.addEventListener('click', () => {
+    if (fieldListConfirmBtn.disabled) return;
+    const failed = fieldChecklist.filter((f, i) => fieldStatuses[i] === 'x');
+    fieldCheckActive = false;
+    fieldListConfirmBtn.style.display = 'none';
+    if (!failed.length) {
+      saveLogEntry('OK 일치완료', '');
+      verdictSlot.innerHTML = '<div class="of-verdict found">✅ OK 일치완료 — 모든 항목이 일치했습니다.</div>';
+    } else {
+      const reason = failed.map(f => f.label + ' 상이').join(', ');
+      saveLogEntry('', '매칭실패; ' + reason);
+      verdictSlot.innerHTML = '<div class="of-verdict unregistered">❌ 매칭실패; ' + escapeHtml(reason) + '</div>';
+    }
+    if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
+  });
 
   document.getElementById('of-confirm').addEventListener('click', () => {
     const finalText = ocrInput.value.trim();
@@ -1492,6 +1533,7 @@
       updateStageUI();
       verdictSlot.innerHTML = '<div class="of-verdict found">PANEL: ' + escapeHtml(selectedPanel) + ' 로 설정되었습니다. 이제 부품 TAG를 촬영하세요.</div>';
       manualRow.style.display = 'none';
+      fieldListConfirmBtn.style.display = 'none';
       return;
     }
 
@@ -1499,9 +1541,10 @@
     currentRow = row;
     if (row) {
       startFieldCheck(row, finalText, rawOcrText);
-      renderFieldStep();
+      renderFieldList();
     } else {
       fieldCheckActive = false;
+      fieldListConfirmBtn.style.display = 'none';
       verdictSlot.innerHTML = '<div class="of-verdict unregistered">TAG "' + escapeHtml(finalText) + '" 이(가) 리스트에 없습니다 (미등록)</div>';
       manualRow.style.display = 'flex';
     }
@@ -1524,26 +1567,13 @@
     renderLog();
   }
   document.getElementById('of-mark-ok').addEventListener('click', () => {
-    if (fieldCheckActive) {
-      fieldIndex++;
-      renderFieldStep();
-      return;
-    }
+    // 리스트에 없는(미등록) TAG를 그냥 육안으로 확인만 할 때 쓰는 단일 확인 버튼.
+    // 리스트에 매칭된 경우의 항목별 확인은 위쪽 "전체 확정" 목록에서 처리한다.
     saveLogEntry('확인', '');
     manualRow.style.display = 'none';
     if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
   });
   document.getElementById('of-mark-x').addEventListener('click', () => {
-    if (fieldCheckActive) {
-      const f = fieldChecklist[fieldIndex];
-      const reason = reasonInput.value.trim() || (f.label + ' 상이');
-      fieldCheckActive = false;
-      saveLogEntry('', '매칭실패; ' + reason);
-      manualRow.style.display = 'none';
-      reasonInput.value = '';
-      if (inMultiReview) { multiIndex++; showNextMultiCandidate(); }
-      return;
-    }
     const reason = reasonInput.value.trim() || (currentRow ? '불일치' : 'TAG 미등록');
     saveLogEntry('', reason);
     manualRow.style.display = 'none';
@@ -1552,6 +1582,7 @@
   });
   document.getElementById('of-multi-skip').addEventListener('click', () => {
     fieldCheckActive = false;
+    fieldListConfirmBtn.style.display = 'none';
     multiIndex++; showNextMultiCandidate();
   });
 
