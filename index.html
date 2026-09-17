@@ -522,6 +522,33 @@
     return fuzzy ? fuzzy.row : null;
   }
 
+  // QR 내용 안에 리스트에 등록된 TAG가 "포함"되어 있는 경우까지 찾아낸다.
+  // (예: QR이 URL이나 긴 문자열이라 TAG 전체와 정확히 같지는 않지만, 그 안에 "281AR1"처럼
+  // 등록된 TAG 문자열이 그대로 들어있는 경우) 등록된 TAG 중 QR 문자열 안에서 실제로 발견되는
+  // 것을 찾아 반환한다. 여러 개가 동시에 발견되면(애매함) 매칭하지 않는다.
+  function findTagInsideText(text) {
+    if (!refList.length || !refKeyCol) return null;
+    let pool = refList;
+    if (refPanelCol && selectedPanel) pool = refList.filter(r => normKey(r[refPanelCol]) === normKey(selectedPanel));
+    const nt = normKey(text);
+    if (!nt) return null;
+    const hits = [];
+    for (const row of pool) {
+      const kn = normKey(row[refKeyCol]);
+      if (kn && kn.length >= 3 && nt.includes(kn)) hits.push(row);
+    }
+    if (hits.length === 1) return hits[0];
+    return null; // 없거나(0개) 애매하면(2개 이상) 매칭하지 않음
+  }
+
+  // QR/텍스트 원문을 리스트와 대조하는 통합 진입점: 1) 전체 일치/퍼지매칭 시도,
+  // 실패하면 2) 등록된 TAG가 원문 안에 포함되어 있는지 탐색한다.
+  function matchTextAgainstList(text) {
+    const direct = matchAgainstList(text);
+    if (direct) return direct;
+    return findTagInsideText(text);
+  }
+
   // ---------- stage UI ----------
   const stageEls = {};
   function updateStageUI() {
@@ -696,14 +723,28 @@
             viewPlaceholder.style.display = frozen ? 'none' : 'flex';
             if (frozen) shot.style.display = 'block';
             rawOcrText = code.data;
-            ocrInput.value = code.data;
             ocrBox.style.display = 'block';
             document.getElementById('of-multi-skip-row').style.display = 'none';
             document.getElementById('of-rotate-row').style.display = 'none';
             document.getElementById('of-ai-row').style.display = 'none';
             cropPreview.style.display = 'none';
-            ocrHint.textContent = 'QR 실시간 인식됨: "' + code.data + '" (필요하면 직접 수정 후 확정)';
-            verdictSlot.innerHTML = '<div class="of-verdict found">📷 QR 자동 인식 완료 — 아래에서 확인 후 확정하세요.</div>';
+            const row = matchTextAgainstList(code.data);
+            currentRow = row;
+            if (row) {
+              const tagVal = row[refKeyCol];
+              ocrInput.value = tagVal;
+              currentValue = tagVal;
+              ocrHint.textContent = 'QR 안에서 등록된 TAG 발견: "' + tagVal + '" (원문: "' + code.data + '")';
+              startFieldCheck(row, tagVal, code.data);
+              renderFieldStep();
+            } else {
+              ocrInput.value = code.data;
+              currentValue = code.data;
+              fieldCheckActive = false;
+              ocrHint.textContent = 'QR 실시간 인식됨: "' + code.data + '" (리스트에 없음 — 필요하면 직접 수정 후 확정)';
+              verdictSlot.innerHTML = '<div class="of-verdict unregistered">QR 내용: "' + escapeHtml(code.data) + '" — 리스트에서 찾지 못함</div>';
+              manualRow.style.display = 'flex';
+            }
             return;
           }
         } catch (e) { /* 프레임 하나 실패는 무시하고 계속 시도 */ }
@@ -913,8 +954,13 @@
   }
 
   // ---------- AI 보조 인식 (오프라인 OCR이 안 읽힐 때만 선택 사용) ----------
+  // Gemini/OpenAI는 모델이 자주 새 버전으로 교체되고 예전 모델은 서비스가 완전히
+  // 종료(404)되는 일이 잦다. 한 번 저장된 기본값이 나중에 죽은 모델을 계속 가리키는 것을
+  // 막기 위해, 알려진 종료 모델이 저장돼 있으면 불러올 때 자동으로 최신값으로 바꿔준다.
+  const DEPRECATED_GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash-lite', 'gemini-2.0-flash-lite-001', 'gemini-1.5-flash', 'gemini-1.5-flash-001', 'gemini-1.5-pro', 'gemini-pro-vision'];
+  const DEPRECATED_OPENAI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'gpt-4-vision-preview', 'gpt-4.1-mini', 'gpt-4.1-nano'];
   function loadAISettings() {
-    return {
+    const s = {
       provider: localStorage.getItem('ai_provider') || 'claude',
       keys: {
         claude: localStorage.getItem('ai_key_claude') || '',
@@ -923,10 +969,15 @@
       },
       models: {
         claude: localStorage.getItem('ai_model_claude') || 'claude-sonnet-4-6',
-        openai: localStorage.getItem('ai_model_openai') || 'gpt-4o-mini',
-        gemini: localStorage.getItem('ai_model_gemini') || 'gemini-2.0-flash'
+        openai: localStorage.getItem('ai_model_openai') || 'gpt-5-mini',
+        gemini: localStorage.getItem('ai_model_gemini') || 'gemini-flash-latest'
       }
     };
+    // gemini-flash-latest / gpt-5 계열처럼 "-latest" 별칭이나 최신 세대를 기본값으로 써서,
+    // 시간이 지나 모델이 또 교체되어도 자동으로 최신판을 가리키도록 한다.
+    if (DEPRECATED_GEMINI_MODELS.includes(s.models.gemini)) s.models.gemini = 'gemini-flash-latest';
+    if (DEPRECATED_OPENAI_MODELS.includes(s.models.openai)) s.models.openai = 'gpt-5-mini';
+    return s;
   }
   function saveAISettings(s) {
     localStorage.setItem('ai_provider', s.provider);
@@ -1045,7 +1096,11 @@
         ocrHint.textContent = 'AI도 글자를 읽지 못했습니다. 값을 직접 입력해주세요.';
       }
     } catch (e) {
-      showError('AI 인식 중 오류: ' + e.message);
+      let msg = e.message || String(e);
+      if (/not found|404|no longer available/i.test(msg)) {
+        msg += ' — 모델명이 오래되어 서비스가 종료됐을 수 있습니다. "API 키 설정"에서 모델명 칸을 확인/수정해주세요.';
+      }
+      showError('AI 인식 중 오류: ' + msg);
     } finally {
       btn.disabled = false; btn.textContent = '🤖 선택한 AI로 다시 인식';
     }
@@ -1277,7 +1332,7 @@
           const imgData = ctx.getImageData(0, 0, sw, sh);
           const code = jsQR(imgData.data, sw, sh, { inversionAttempts: 'attemptBoth' });
           if (code && code.data) {
-            candidates.push({ raw: code.data, row: null, bbox: null, kind: 'QR' });
+            candidates.push({ raw: code.data, row: matchTextAgainstList(code.data), bbox: null, kind: 'QR' });
             qrStatus = 'QR 찾음(전체화면)';
           } else {
             qrStatus = 'QR 못 찾음(전체화면)';
@@ -1295,7 +1350,7 @@
             const qData = qctx.getImageData(0, 0, cropForQR.width, cropForQR.height);
             const code2 = jsQR(qData.data, cropForQR.width, cropForQR.height, { inversionAttempts: 'attemptBoth' });
             if (code2 && code2.data) {
-              candidates.push({ raw: code2.data, row: null, bbox: null, kind: 'QR' });
+              candidates.push({ raw: code2.data, row: matchTextAgainstList(code2.data), bbox: null, kind: 'QR' });
               qrStatus = 'QR 찾음(선택영역 확대)';
             } else {
               qrStatus += ' / 선택영역에서도 못 찾음';
