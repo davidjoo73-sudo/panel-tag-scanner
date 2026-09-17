@@ -185,6 +185,7 @@
     <button class="of-btn primary" id="of-confirm" style="width:100%; margin-top:10px;">이 값으로 확정</button>
 
     <div id="of-verdict-slot"></div>
+    <button class="of-btn" id="of-ai-fields-btn" style="width:100%; display:none; margin-top:6px;">🤖 AI로 MODEL·MAKER도 사진에서 읽기</button>
     <button class="of-btn primary" id="of-fieldlist-confirm" style="width:100%; display:none; margin-top:6px;" disabled>전체 확정 (모든 항목 확인 후 활성화)</button>
 
     <div class="of-manual" id="of-manual-row" style="display:none;">
@@ -743,6 +744,7 @@
               currentValue = code.data;
               fieldCheckActive = false;
               fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
               ocrHint.textContent = 'QR 실시간 인식됨: "' + code.data + '" (리스트에 없음 — 필요하면 직접 수정 후 확정)';
               verdictSlot.innerHTML = '<div class="of-verdict unregistered">QR 내용: "' + escapeHtml(code.data) + '" — 리스트에서 찾지 못함</div>';
               manualRow.style.display = 'flex';
@@ -1108,6 +1110,67 @@
     }
   });
 
+  // ---------- AI로 사진 전체에서 TAG/DESCRIPTION/MODEL/MAKER를 한번에 읽어서
+  // 각 항목의 "인식된 값"으로 채워준다 (선택 사용 — 인터넷/API 비용 필요) ----------
+  document.getElementById('of-ai-fields-btn').addEventListener('click', async () => {
+    const s = loadAISettings();
+    const provider = aiProviderSelect.value;
+    const apiKey = s.keys[provider];
+    if (!apiKey) { showError('먼저 "API 키 설정"에서 ' + provider + ' 키를 입력하고 저장해주세요.'); return; }
+    if (!fieldCheckActive || !fieldChecklist.length) return;
+    clearError();
+    const btn2 = document.getElementById('of-ai-fields-btn');
+    btn2.disabled = true; btn2.textContent = '🤖 AI가 명판 전체를 읽는 중…';
+    try {
+      // TAG 크롭이 아니라 정지된 사진 전체를 보낸다 — MODEL/MAKER 글자는 보통 TAG 라벨과
+      // 다른 위치(명판 본문)에 있기 때문이다.
+      const fullW = parseInt(shot.dataset.w, 10) || shot.naturalWidth || 0;
+      const fullH = parseInt(shot.dataset.h, 10) || shot.naturalHeight || 0;
+      if (!fullW || !fullH) throw new Error('사진을 아직 읽을 수 없습니다.');
+      const fieldCanvas = document.createElement('canvas');
+      fieldCanvas.width = fullW; fieldCanvas.height = fullH;
+      fieldCanvas.getContext('2d').drawImage(shot, 0, 0, fullW, fullH);
+      const base64 = fieldCanvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+      const prompt = '이 이미지는 전기/기계 부품 명판(nameplate) 사진입니다. 사진에서 실제로 보이는 다음 정보를 정확히 읽어서 ' +
+        'JSON 객체 하나만 출력하세요 (설명, 코드블록, 다른 텍스트 없이 JSON만): ' +
+        '{"tag":"부품 태그/선번호", "description":"품명/설명", "model":"모델명/모델번호", "maker":"제조사"} ' +
+        '해당 정보가 사진에 보이지 않으면 그 값은 빈 문자열("")로 두세요. 추측하지 말고 실제로 보이는 글자만 읽으세요.';
+      const raw = await callAI(provider, apiKey, s.models[provider], base64, prompt);
+      const jsonText = raw.replace(/```json|```/g, '').trim();
+      let parsed;
+      try { parsed = JSON.parse(jsonText); } catch (e) { throw new Error('AI 응답을 해석하지 못했습니다: ' + raw.slice(0, 80)); }
+
+      // MODEL은 코일/전압 서픽스(예: CAD326 뒤에 붙는 "M7")처럼 사진에서도 작고 헷갈리기 쉬운
+      // 부분이라, AI가 자동으로 채우지 않고 항상 사람이 직접 실물을 보고 확인하도록 제외한다.
+      const keyMap = { maker: 'maker', description: 'description', tag: 'tag' };
+      let filled = 0;
+      fieldChecklist.forEach((f, i) => {
+        const aiKey = keyMap[f.key];
+        if (!aiKey) return;
+        const val = (parsed[aiKey] || '').toString().trim();
+        if (val) {
+          f.rawValue = val;
+          fieldStatuses[i] = null; // 새 값이 채워졌으니 다시 확인하도록 상태 초기화
+          filled++;
+        }
+      });
+      if (filled) {
+        renderFieldList();
+        ocrHint.textContent = provider + ' AI가 명판에서 ' + filled + '개 항목을 추가로 읽어왔습니다. 각 항목을 확인해주세요.';
+      } else {
+        ocrHint.textContent = 'AI가 이 사진에서 추가로 읽어낼 항목(MODEL/MAKER 등)을 찾지 못했습니다.';
+      }
+    } catch (e) {
+      let msg = e.message || String(e);
+      if (/not found|404|no longer available/i.test(msg)) {
+        msg += ' — 모델명이 오래되어 서비스가 종료됐을 수 있습니다. "API 키 설정"에서 모델명 칸을 확인/수정해주세요.';
+      }
+      showError('AI 인식 중 오류: ' + msg);
+    } finally {
+      btn2.disabled = false; btn2.textContent = '🤖 AI로 MODEL·MAKER도 사진에서 읽기';
+    }
+  });
+
   // ---------- OCR engine (Tesseract.js) ----------
   async function initEngine() {
     try {
@@ -1226,6 +1289,7 @@
       fieldCheckActive = false;
       ocrHint.textContent = '(' + (multiIndex + 1) + '/' + multiCandidates.length + ') [' + kindLabel + '] 리스트와 자동 매칭되지 않았습니다. 필요하면 직접 수정하세요.';
       fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
       verdictSlot.innerHTML =
         '<div class="of-verdict unregistered">' + kindLabel + ' 내용: "' + escapeHtml(cand.raw) + '" — 리스트에 없거나 QR/URL 내용입니다.</div>';
     }
@@ -1426,6 +1490,7 @@
   let currentValue = '', currentRow = null;
   let fieldChecklist = [], fieldStatuses = [], fieldReasons = [], fieldCheckActive = false;
   const fieldListConfirmBtn = document.getElementById('of-fieldlist-confirm');
+  const aiFieldsBtn = document.getElementById('of-ai-fields-btn');
 
   // TAG가 리스트에서 매칭되면, DEVICE TAG → DESCRIPTION → MODEL → ORDER SPEC.2 → MAKER →
   // (비고, 있을 때만) 전체를 한 화면에 목록으로 다 보여주고, 항목마다 개별로 확인/불일치를
@@ -1473,6 +1538,7 @@
 
     const allAnswered = fieldStatuses.every(s => s !== null);
     fieldListConfirmBtn.style.display = 'block';
+    aiFieldsBtn.style.display = 'block';
     fieldListConfirmBtn.disabled = !allAnswered;
     fieldListConfirmBtn.textContent = allAnswered
       ? (fieldStatuses.every(s => s === 'ok') ? '✅ 전체 확정 — OK 일치완료' : '⚠️ 전체 확정 — 매칭실패로 기록')
@@ -1499,6 +1565,7 @@
     const failed = fieldChecklist.filter((f, i) => fieldStatuses[i] === 'x');
     fieldCheckActive = false;
     fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
     if (!failed.length) {
       saveLogEntry('OK 일치완료', '');
       verdictSlot.innerHTML = '<div class="of-verdict found">✅ OK 일치완료 — 모든 항목이 일치했습니다.</div>';
@@ -1534,6 +1601,7 @@
       verdictSlot.innerHTML = '<div class="of-verdict found">PANEL: ' + escapeHtml(selectedPanel) + ' 로 설정되었습니다. 이제 부품 TAG를 촬영하세요.</div>';
       manualRow.style.display = 'none';
       fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
       return;
     }
 
@@ -1545,6 +1613,7 @@
     } else {
       fieldCheckActive = false;
       fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
       verdictSlot.innerHTML = '<div class="of-verdict unregistered">TAG "' + escapeHtml(finalText) + '" 이(가) 리스트에 없습니다 (미등록)</div>';
       manualRow.style.display = 'flex';
     }
@@ -1583,6 +1652,7 @@
   document.getElementById('of-multi-skip').addEventListener('click', () => {
     fieldCheckActive = false;
     fieldListConfirmBtn.style.display = 'none';
+      aiFieldsBtn.style.display = 'none';
     multiIndex++; showNextMultiCandidate();
   });
 
